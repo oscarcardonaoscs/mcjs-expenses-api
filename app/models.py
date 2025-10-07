@@ -7,12 +7,16 @@ class Category(Base):
     __tablename__ = "categories"
     id = Column(Integer, primary_key=True)
     name = Column(String(100), unique=True, nullable=False)
+    # relación inversa
+    expenses = relationship("Expense", back_populates="category")
 
 
 class Vendor(Base):
     __tablename__ = "vendors"
     id = Column(Integer, primary_key=True)
     name = Column(String(150), unique=True, nullable=False)
+    # relación inversa
+    expenses = relationship("Expense", back_populates="vendor")
 
 
 class Expense(Base):
@@ -23,5 +27,8 @@ class Expense(Base):
     note = Column(String(255))
     category_id = Column(Integer, ForeignKey("categories.id"))
     vendor_id = Column(Integer, ForeignKey("vendors.id"))
-    category = relationship("Category")
-    vendor = relationship("Vendor")
+    category = relationship("Category", back_populates="expenses")
+    vendor = relationship("Vendor", back_populates="expenses")
+
+    category = relationship("Category", back_populates="expenses")
+    vendor = relationship("Vendor", back_populates="expenses")

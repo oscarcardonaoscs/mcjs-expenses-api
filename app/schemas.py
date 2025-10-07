@@ -1,28 +1,55 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, constr
 from datetime import date
 from typing import Optional, List
+
+
+class CategoryBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class CategoryCreate(CategoryBase):
+    pass
 
 
 class CategoryIn(BaseModel):
     name: str
 
 
-class CategoryOut(CategoryIn):
+class CategoryUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=100)
+
+
+class CategoryOut(CategoryBase):
     id: int
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+
+
+class CategoriesListResponse(BaseModel):
+    items: list[CategoryOut]
+
+
+# ---------- Vendor ----------
+class VendorOut(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
 
 
 class VendorIn(BaseModel):
-    name: str
+    name: constr(strip_whitespace=True, min_length=1, max_length=150)
 
 
-class VendorOut(VendorIn):
-    id: int
+class VendorUpdate(BaseModel):
+    name: Optional[constr(strip_whitespace=True,
+                          min_length=1, max_length=150)] = None
 
-    class Config:
-        orm_mode = True
+
+class ListVendorsResponse(BaseModel):
+    items: list[VendorOut]
 
 
 class ExpenseIn(BaseModel):
@@ -43,4 +70,4 @@ class ExpenseOut(ExpenseIn):
 
 
 class ListResponse(BaseModel):
-    items: list
+    items: List[ExpenseOut]

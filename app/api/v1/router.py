@@ -1,7 +1,9 @@
 from fastapi import APIRouter
-from . import expenses, categories, vendors
+from .expenses import router as expenses_router
+from .categories import router as categories_router
+from .vendors import router as vendors_router
 
-api_router = APIRouter()
-api_router.include_router(expenses.router)
-api_router.include_router(categories.router)
-api_router.include_router(vendors.router)
+api = APIRouter()
+api.include_router(expenses_router)
+api.include_router(categories_router)
+api.include_router(vendors_router)
