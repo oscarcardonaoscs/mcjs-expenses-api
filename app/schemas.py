@@ -1,6 +1,9 @@
 from pydantic import BaseModel, Field, constr
-from datetime import date
-from typing import Optional, List
+from datetime import date, datetime
+from typing import Optional, List, Literal
+
+PaymentMethod = Literal["CASH", "CARD", "ZELLE",
+                        "VENMO", "CASHAPP", "CHECK"]
 
 
 class CategoryBase(BaseModel):
@@ -54,19 +57,48 @@ class ListVendorsResponse(BaseModel):
 
 class ExpenseIn(BaseModel):
     date: date
-    amount: float
-    note: Optional[str] = None
     category_id: Optional[int] = None
     vendor_id: Optional[int] = None
 
+    description: Optional[str] = None
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    gallons_miles: Optional[float] = None
 
-class ExpenseOut(ExpenseIn):
+    expense_type: Optional[str] = None
+    payment_method: Optional[PaymentMethod] = None
+    receipt_url: Optional[str] = None
+
+    total: float
+    notes: Optional[str] = None
+
+
+class ExpenseOut(BaseModel):
     id: int
-    category_name: Optional[str] = None
-    vendor_name: Optional[str] = None
+    date: date
+
+    category_id: Optional[int] = None
+    vendor_id: Optional[int] = None
+
+    description: Optional[str] = None
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    gallons_miles: Optional[float] = None
+
+    expense_type: Optional[str] = None
+    payment_method: Optional[str] = None
+    receipt_url: Optional[str] = None
+
+    total: float
+    notes: Optional[str] = None
+
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class ListResponse(BaseModel):
