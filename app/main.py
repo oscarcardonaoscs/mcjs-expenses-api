@@ -12,7 +12,8 @@ app = FastAPI(title="MCJ Expenses API", version="1.0")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    # "https://expenses.mcjscleaningservice.com",  # cuando lo publiques
+    "https://expenses.mcjscleaningservice.com",
+    "https://mcjscleaningservice.com",
 ]
 
 app.add_middleware(
