@@ -12,5 +12,5 @@ def get_expenses(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=schemas.ExpenseOut)
-def post_expense(data: schemas.ExpenseIn, db: Session = Depends(get_db)):
+def post_expense(data: schemas.ExpenseCreate, db: Session = Depends(get_db)):
     return crud.create_expense(db, data)
