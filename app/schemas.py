@@ -6,7 +6,6 @@ from typing_extensions import Literal
 DecimalMoney = condecimal(max_digits=10, decimal_places=2)
 DecimalQty = condecimal(max_digits=10, decimal_places=3)
 
-
 PaymentMethod = Literal["CASH", "CARD", "ZELLE",
                         "VENMO", "CASHAPP", "CHECK"]
 
@@ -110,20 +109,26 @@ class ExpenseCreate(BaseModel):
     vendor_id: Optional[int] = None
 
     description: Optional[str] = None
+
+    # NUEVOS (Helpers)
+    helper_name: Optional[constr(strip_whitespace=True, max_length=100)] = None
+    task_project: Optional[constr(
+        strip_whitespace=True, max_length=120)] = None
+    paid: Optional[bool] = False
+
     quantity: Optional[DecimalQty] = None
     unit: Optional[str] = None
-    unit_price: Optional[DecimalMoney] = None
+    unit_price: Optional[DecimalQty] = None
 
     apply_tax: Optional[bool] = True
     gallons_miles: Optional[DecimalQty] = None
 
-    expense_type: Optional[str] = None
+    expense_type: Optional[str] = None  # "Helpers" para la categoría Helpers
     payment_method: Optional[PaymentMethod] = None
     receipt_url: Optional[str] = None
 
     payment_account_id: Optional[int] = None
 
-    # Si no hay unit_price/quantity, puedes mandar total manual
     total: Optional[DecimalMoney] = None
     notes: Optional[str] = None
 
@@ -134,9 +139,16 @@ class ExpenseUpdate(BaseModel):
     vendor_id: Optional[int] = None
 
     description: Optional[str] = None
+
+    # NUEVOS (Helpers)
+    helper_name: Optional[constr(strip_whitespace=True, max_length=100)] = None
+    task_project: Optional[constr(
+        strip_whitespace=True, max_length=120)] = None
+    paid: Optional[bool] = None
+
     quantity: Optional[DecimalQty] = None
     unit: Optional[str] = None
-    unit_price: Optional[DecimalMoney] = None
+    unit_price: Optional[DecimalQty] = None
 
     apply_tax: Optional[bool] = None
     gallons_miles: Optional[DecimalQty] = None
@@ -159,9 +171,15 @@ class ExpenseOut(BaseModel):
     vendor_id: Optional[int] = None
 
     description: Optional[str] = None
+
+    # NUEVOS (Helpers)
+    helper_name: Optional[str] = None
+    task_project: Optional[str] = None
+    paid: Optional[bool] = None
+
     quantity: Optional[DecimalQty] = None
     unit: Optional[str] = None
-    unit_price: Optional[DecimalMoney] = None
+    unit_price: Optional[DecimalQty] = None
 
     apply_tax: Optional[bool] = None
     gallons_miles: Optional[DecimalQty] = None

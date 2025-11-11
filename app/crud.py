@@ -113,7 +113,12 @@ def _compute_from_parts(unit_price, quantity, apply_tax_bool: bool):
 def create_expense(db: Session, data: schemas.ExpenseCreate):
     logger.info("[create_expense] Received data: %s", data.model_dump())
 
-    apply_tax_bool = True if data.apply_tax is None else data.apply_tax
+    # Helpers?
+    is_helpers = (data.expense_type or "").strip().lower() == "helpers"
+
+    # apply_tax: para helpers forzamos False
+    apply_tax_bool = False if is_helpers else (
+        True if data.apply_tax is None else bool(data.apply_tax))
 
     # Normaliza strings
     desc = data.description.strip() if data.description else None
@@ -122,54 +127,91 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
     receipt = data.receipt_url.strip() if data.receipt_url else None
     notes = data.notes.strip() if data.notes else None
 
+    # Helpers extras
+    helper_name = (data.helper_name or "").strip() or None
+    task_project = (data.task_project or "").strip() or None
+    paid = bool(data.paid) if data.paid is not None else False
+
+    # Vendor: en Helpers normalmente no aplica
+    vendor_id = None if is_helpers else data.vendor_id
+
     subtotal = None
     tax_amount = Decimal("0.00")
     total = None
 
-    # Caso A: se proporcionan unit_price y quantity -> calcular
-    if data.unit_price is not None and data.quantity is not None:
-        subtotal, tax_amount, total = _compute_from_parts(
-            unit_price=data.unit_price,
-            quantity=data.quantity,
-            apply_tax_bool=apply_tax_bool
-        )
-        quantity = _qty(Decimal(str(data.quantity)))
-        unit_price = _money(Decimal(str(data.unit_price)))
+    # ---- MONTOS ----
+    if is_helpers:
+        # Requiere horas y rate (quantity y unit_price)
+        q = Decimal(str(data.quantity)
+                    ) if data.quantity is not None else Decimal("0")
+        p = Decimal(str(data.unit_price)
+                    ) if data.unit_price is not None else Decimal("0")
+        q = _qty(q)
+        p = _money(p)
+        subtotal = _money(q * p)
+        tax_amount = Decimal("0.00")
+        total = subtotal
+        unit = "hour" if not unit else unit
+        # autodescripción si viene vacío
+        if not desc:
+            base = []
+            if helper_name:
+                base.append(helper_name)
+            if task_project:
+                base.append(task_project)
+            desc = " - ".join(base) or "Helpers payment"
     else:
-        # Caso B: no hay partes -> usar total manual
-        if data.total is None:
-            raise ValueError(
-                "Either (unit_price & quantity) or total must be provided.")
-        total = _money(Decimal(str(data.total)))
-        quantity = Decimal(str(data.quantity)
-                           ) if data.quantity is not None else None
-        unit_price = Decimal(str(data.unit_price)
-                             ) if data.unit_price is not None else None
+        # No-Helpers: partes o total manual
+        if data.unit_price is not None and data.quantity is not None:
+            subtotal, tax_amount, total = _compute_from_parts(
+                unit_price=data.unit_price,
+                quantity=data.quantity,
+                apply_tax_bool=apply_tax_bool
+            )
+            quantity = _qty(Decimal(str(data.quantity)))
+            unit_price = _money(Decimal(str(data.unit_price)))
+        else:
+            if data.total is None:
+                raise ValueError(
+                    "Either (unit_price & quantity) or total must be provided.")
+            total = _money(Decimal(str(data.total)))
+            quantity = Decimal(str(data.quantity)
+                               ) if data.quantity is not None else None
+            unit_price = Decimal(str(data.unit_price)
+                                 ) if data.unit_price is not None else None
+            subtotal = None  # cuando viene total manual
+            tax_amount = Decimal("0.00")
 
     obj = models.Expense(
         date=data.date,
         category_id=data.category_id,
-        vendor_id=data.vendor_id,
+        vendor_id=vendor_id,
 
         description=desc,
-        quantity=quantity if quantity is None else _qty(
-            Decimal(str(quantity))),
+        helper_name=helper_name if is_helpers else (data.helper_name or None),
+        task_project=task_project if is_helpers else (
+            data.task_project or None),
+
+        quantity=_qty(Decimal(str(data.quantity))) if data.quantity is not None else (
+            q if is_helpers else None),
         unit=unit,
-        unit_price=unit_price if unit_price is None else _money(
-            Decimal(str(unit_price))),
+        unit_price=_money(Decimal(str(data.unit_price))) if data.unit_price is not None else (
+            p if is_helpers else None),
 
         apply_tax=apply_tax_bool,
         subtotal=subtotal,
         tax_amount=tax_amount,
 
-        gallons_miles=Decimal(str(data.gallons_miles)
-                              ) if data.gallons_miles is not None else None,
+        gallons_miles=_qty(Decimal(str(data.gallons_miles))
+                           ) if data.gallons_miles is not None else None,
 
         expense_type=exp_type,
         payment_method=(data.payment_method if data.payment_method else None),
         receipt_url=receipt,
 
         payment_account_id=data.payment_account_id,
+        paid=paid if is_helpers else (
+            bool(data.paid) if data.paid is not None else False),
 
         total=total,
         notes=notes,
@@ -180,8 +222,8 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
     db.refresh(obj)
 
     logger.info(
-        "[create_expense] Inserted ID=%s | category=%s | vendor=%s | payment_account_id=%s | subtotal=%s | tax=%s | total=%s",
-        obj.id, obj.category_id, obj.vendor_id, obj.payment_account_id, obj.subtotal, obj.tax_amount, obj.total
+        "[create_expense] Inserted ID=%s | type=%s | subtotal=%s | tax=%s | total=%s",
+        obj.id, obj.expense_type, obj.subtotal, obj.tax_amount, obj.total
     )
     return obj
 
@@ -198,7 +240,7 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if not obj:
         raise ValueError("Expense not found")
 
-    # Aplica cambios
+    # Cambios simples
     if data.date is not None:
         obj.date = data.date
     if data.category_id is not None:
@@ -217,12 +259,20 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if data.notes is not None:
         obj.notes = data.notes.strip() if data.notes else None
 
+    # Helpers extras
+    if data.helper_name is not None:
+        obj.helper_name = data.helper_name.strip() if data.helper_name else None
+    if data.task_project is not None:
+        obj.task_project = data.task_project.strip() if data.task_project else None
+    if data.paid is not None:
+        obj.paid = bool(data.paid)
+
     if data.payment_method is not None:
         obj.payment_method = data.payment_method
     if data.payment_account_id is not None:
         obj.payment_account_id = data.payment_account_id
 
-    # Campos numéricos
+    # Numéricos
     if data.quantity is not None:
         obj.quantity = _qty(Decimal(str(data.quantity)))
     if data.unit_price is not None:
@@ -230,29 +280,39 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if data.gallons_miles is not None:
         obj.gallons_miles = _qty(Decimal(str(data.gallons_miles)))
     if data.apply_tax is not None:
-        obj.apply_tax = data.apply_tax
+        obj.apply_tax = bool(data.apply_tax)
 
-    # Reglas de recalculo:
-    # - Si hay unit_price y quantity -> recalcular (ignorar total manual)
-    # - Si NO hay partes y viene total -> actualizar total y dejar subtotal/tax coherentes (subtotal=None, tax=0)
+    # ---- Reglas por tipo ----
+    is_helpers = (obj.expense_type or "").strip().lower() == "helpers"
     has_parts = (obj.unit_price is not None and obj.quantity is not None)
 
-    if has_parts:
-        sub, tax, tot = _compute_from_parts(
-            unit_price=obj.unit_price,
-            quantity=obj.quantity,
-            apply_tax_bool=bool(obj.apply_tax)
-        )
-        obj.subtotal = sub
-        obj.tax_amount = tax
-        obj.total = tot
-    else:
-        # Sin partes; permite total manual si viene en el update
-        if data.total is not None:
-            obj.total = _money(Decimal(str(data.total)))
-        # Mantén snapshots coherentes para este caso:
-        obj.subtotal = None
+    if is_helpers:
+        # Forzar sin TAX, total = horas * rate
+        q = obj.quantity or Decimal("0")
+        p = obj.unit_price or Decimal("0")
+        obj.subtotal = _money(q * p)
         obj.tax_amount = Decimal("0.00")
+        obj.total = obj.subtotal
+        obj.apply_tax = False
+        # Vendor normalmente no aplica
+        # (si quieres forzarlo a NULL, descomenta la línea)
+        # obj.vendor_id = None
+    else:
+        if has_parts:
+            sub, tax, tot = _compute_from_parts(
+                unit_price=obj.unit_price,
+                quantity=obj.quantity,
+                apply_tax_bool=bool(obj.apply_tax)
+            )
+            obj.subtotal = sub
+            obj.tax_amount = tax
+            obj.total = tot
+        else:
+            # Permite total manual
+            if data.total is not None:
+                obj.total = _money(Decimal(str(data.total)))
+            obj.subtotal = None
+            obj.tax_amount = Decimal("0.00")
 
     db.commit()
     db.refresh(obj)
