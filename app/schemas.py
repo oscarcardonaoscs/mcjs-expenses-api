@@ -6,13 +6,13 @@ from typing_extensions import Literal
 DecimalMoney = condecimal(max_digits=10, decimal_places=2)
 DecimalQty = condecimal(max_digits=10, decimal_places=3)
 
-PaymentMethod = Literal["CASH", "CARD", "ZELLE",
-                        "VENMO", "CASHAPP", "CHECK"]
+PaymentMethod = Literal["CASH", "CARD", "ZELLE", "VENMO", "CASHAPP", "CHECK"]
 
 PaymentAccountType = Literal["CASH", "DEBIT",
                              "CREDIT", "BANK", "ZELLE", "CHECK", "OTHER"]
 
 
+# ---------- Category ----------
 class CategoryBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
@@ -26,7 +26,7 @@ class CategoryIn(BaseModel):
 
 
 class CategoryUpdate(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=100)
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
 
 
 class CategoryOut(CategoryBase):
@@ -37,7 +37,7 @@ class CategoryOut(CategoryBase):
 
 
 class CategoriesListResponse(BaseModel):
-    items: list[CategoryOut]
+    items: List[CategoryOut]
 
 
 # ---------- Vendor ----------
@@ -59,11 +59,10 @@ class VendorUpdate(BaseModel):
 
 
 class ListVendorsResponse(BaseModel):
-    items: list[VendorOut]
-
-# -----------Payment Accounts-----------
+    items: List[VendorOut]
 
 
+# ---------- Payment Accounts ----------
 class PaymentAccountIn(BaseModel):
     name: constr(strip_whitespace=True, min_length=1, max_length=100)
     type: PaymentAccountType
@@ -90,8 +89,8 @@ class PaymentAccountOut(BaseModel):
     provider: Optional[str] = None
     last4: Optional[str] = None
     is_active: bool
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -100,9 +99,8 @@ class PaymentAccountOut(BaseModel):
 class ListPaymentAccountsResponse(BaseModel):
     items: List[PaymentAccountOut]
 
+
 # ---------- Expense ----------
-
-
 class ExpenseCreate(BaseModel):
     date: date
     category_id: Optional[int] = None
@@ -110,7 +108,7 @@ class ExpenseCreate(BaseModel):
 
     description: Optional[str] = None
 
-    # NUEVOS (Helpers)
+    # Helpers / Payroll
     helper_name: Optional[constr(strip_whitespace=True, max_length=100)] = None
     task_project: Optional[constr(
         strip_whitespace=True, max_length=120)] = None
@@ -118,12 +116,13 @@ class ExpenseCreate(BaseModel):
 
     quantity: Optional[DecimalQty] = None
     unit: Optional[str] = None
-    unit_price: Optional[DecimalQty] = None
+    # unit_price es dinero, no cantidad
+    unit_price: Optional[DecimalMoney] = None
 
     apply_tax: Optional[bool] = True
     gallons_miles: Optional[DecimalQty] = None
 
-    expense_type: Optional[str] = None  # "Helpers" para la categoría Helpers
+    expense_type: Optional[str] = None  # p.ej., "Helpers"
     payment_method: Optional[PaymentMethod] = None
     receipt_url: Optional[str] = None
 
@@ -140,7 +139,7 @@ class ExpenseUpdate(BaseModel):
 
     description: Optional[str] = None
 
-    # NUEVOS (Helpers)
+    # Helpers / Payroll
     helper_name: Optional[constr(strip_whitespace=True, max_length=100)] = None
     task_project: Optional[constr(
         strip_whitespace=True, max_length=120)] = None
@@ -148,7 +147,7 @@ class ExpenseUpdate(BaseModel):
 
     quantity: Optional[DecimalQty] = None
     unit: Optional[str] = None
-    unit_price: Optional[DecimalQty] = None
+    unit_price: Optional[DecimalMoney] = None
 
     apply_tax: Optional[bool] = None
     gallons_miles: Optional[DecimalQty] = None
@@ -172,14 +171,14 @@ class ExpenseOut(BaseModel):
 
     description: Optional[str] = None
 
-    # NUEVOS (Helpers)
+    # Helpers / Payroll
     helper_name: Optional[str] = None
     task_project: Optional[str] = None
     paid: Optional[bool] = None
 
     quantity: Optional[DecimalQty] = None
     unit: Optional[str] = None
-    unit_price: Optional[DecimalQty] = None
+    unit_price: Optional[DecimalMoney] = None
 
     apply_tax: Optional[bool] = None
     gallons_miles: Optional[DecimalQty] = None
