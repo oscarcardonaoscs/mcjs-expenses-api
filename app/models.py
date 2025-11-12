@@ -65,7 +65,7 @@ class Expense(Base):
 
     quantity = Column(DECIMAL(10, 3), nullable=True)
     unit = Column(String(30), nullable=True)
-    unit_price = Column(DECIMAL(10, 2), nullable=True)
+    unit_price = Column(DECIMAL(10, 3), nullable=True)
 
     apply_tax = Column(Boolean, nullable=False, default=True)
     tax_amount = Column(DECIMAL(10, 2), nullable=True)

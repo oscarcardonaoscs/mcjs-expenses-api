@@ -3,7 +3,7 @@ from datetime import date, datetime
 from typing import Optional, List
 from typing_extensions import Literal
 
-DecimalMoney = condecimal(max_digits=10, decimal_places=2)
+DecimalMoney = condecimal(max_digits=10, decimal_places=3)
 DecimalQty = condecimal(max_digits=10, decimal_places=3)
 
 PaymentMethod = Literal["CASH", "CARD", "ZELLE", "VENMO", "CASHAPP", "CHECK"]
