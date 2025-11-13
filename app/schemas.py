@@ -193,6 +193,10 @@ class ExpenseOut(BaseModel):
     total: DecimalMoney
     notes: Optional[str] = None
 
+    category_name: Optional[str] = None
+    vendor_name: Optional[str] = None
+    payment_account_last4: Optional[str] = None
+
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

@@ -229,10 +229,35 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
 
 
 def list_expenses(db: Session):
-    q = select(models.Expense).order_by(
-        models.Expense.date.desc(), models.Expense.id.desc()
+    E = models.Expense
+    C = models.Category
+    V = models.Vendor
+    PA = models.PaymentAccount
+
+    stmt = (
+        select(
+            E.id,
+            E.date,
+            E.category_id,
+            E.vendor_id,
+            E.expense_type,
+            E.total,
+            E.payment_method,
+            E.payment_account_id,
+            C.name.label("category_name"),
+            V.name.label("vendor_name"),
+            PA.last4.label("payment_account_last4"),
+        )
+        .select_from(E)
+        .outerjoin(C, E.category_id == C.id)
+        .outerjoin(V, E.vendor_id == V.id)
+        .outerjoin(PA, E.payment_account_id == PA.id)
+        .order_by(E.date.desc(), E.id.desc())
     )
-    return db.scalars(q).all()
+
+    # mappings() devuelve dicts por fila
+    rows = db.execute(stmt).mappings().all()
+    return [schemas.ExpenseOut(**row) for row in rows]
 
 
 def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
