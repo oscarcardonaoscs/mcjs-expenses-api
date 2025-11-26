@@ -1,8 +1,9 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, extract
 from . import models, schemas
 import logging
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
 
 logger = logging.getLogger("uvicorn")
 
@@ -228,7 +229,12 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
     return obj
 
 
-def list_expenses(db: Session):
+def list_expenses(
+    db: Session,
+    category_id: Optional[int] = None,
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+):
     E = models.Expense
     C = models.Category
     V = models.Vendor
@@ -241,6 +247,7 @@ def list_expenses(db: Session):
             E.category_id,
             E.vendor_id,
             E.expense_type,
+            E.description,
             E.total,
             E.payment_method,
             E.payment_account_id,
@@ -254,6 +261,20 @@ def list_expenses(db: Session):
         .outerjoin(PA, E.payment_account_id == PA.id)
         .order_by(E.date.desc(), E.id.desc())
     )
+
+    # ---------- Filtros dinámicos ----------
+    if category_id is not None:
+        stmt = stmt.where(E.category_id == category_id)
+
+    if month is not None:
+        # E.date es Date, usamos extract('month', date)
+        stmt = stmt.where(extract("month", E.date) == month)
+
+    if year is not None:
+        stmt = stmt.where(extract("year", E.date) == year)
+
+    # Orden final (más reciente primero)
+    stmt = stmt.order_by(E.date.desc(), E.id.desc())
 
     # mappings() devuelve dicts por fila
     rows = db.execute(stmt).mappings().all()
