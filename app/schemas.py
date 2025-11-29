@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, constr, condecimal
 from datetime import date, datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 from typing_extensions import Literal
 
 DecimalMoney = condecimal(max_digits=10, decimal_places=3)
@@ -206,3 +206,19 @@ class ExpenseOut(BaseModel):
 
 class ListResponse(BaseModel):
     items: List[ExpenseOut]
+
+
+class MonthlyCategoryTotals(BaseModel):
+    # "2025-01"
+    month: str = Field(..., pattern=r"^\d{4}-\d{2}$")
+    month_label: str                      # "Jan"
+    categories: Dict[str, DecimalMoney]
+    total: DecimalMoney
+
+    class Config:
+        from_attributes = True
+
+
+class AnnualExpensesByCategoryResponse(BaseModel):
+    year: int
+    items: List[MonthlyCategoryTotals]

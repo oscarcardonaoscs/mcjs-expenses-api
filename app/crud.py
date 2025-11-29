@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import select, extract
+from sqlalchemy import select, extract, func
+from datetime import date
+import calendar
 from . import models, schemas
 import logging
 from decimal import Decimal, ROUND_HALF_UP
@@ -424,3 +426,61 @@ def delete_payment_account(db: Session, account_id: int):
         return
     db.delete(obj)
     db.commit()
+
+
+def report_annual_expenses_by_category(db: Session, year: int) -> schemas.AnnualExpensesByCategoryResponse:
+    """
+    Aggregate expenses by month and category for a given year.
+    Assumes:
+      - models.Expense has: date (date), total (Decimal), category_id (FK)
+      - models.Category has: id, name
+    Adjust joins/fields if your model names differ.
+    """
+    if not year:
+        year = date.today().year
+
+    stmt = (
+        select(
+            func.year(models.Expense.date).label("y"),
+            func.month(models.Expense.date).label("m"),
+            models.Category.name.label("category"),
+            func.sum(models.Expense.total).label("total"),
+        )
+        .join(models.Category, models.Expense.category_id == models.Category.id)
+        .where(func.year(models.Expense.date) == year)
+        .group_by("y", "m", models.Category.name)
+        .order_by("y", "m", models.Category.name)
+    )
+
+    rows = db.execute(stmt).all()
+
+    buckets: dict[str, dict] = {}
+    for y, m, category, total in rows:
+        ym_key = f"{int(y):04d}-{int(m):02d}"
+        if ym_key not in buckets:
+            buckets[ym_key] = {
+                "categories": {},
+                "total": Decimal("0.00"),
+            }
+
+        money_total = _money(total)  # usa tu helper para redondear
+        buckets[ym_key]["categories"][category] = money_total
+        buckets[ym_key]["total"] = _money(
+            buckets[ym_key]["total"] + money_total)
+
+    items: list[schemas.MonthlyCategoryTotals] = []
+    for ym in sorted(buckets.keys()):
+        _, mm = ym.split("-")
+        month_label = calendar.month_abbr[int(mm)]
+        bucket = buckets[ym]
+
+        items.append(
+            schemas.MonthlyCategoryTotals(
+                month=ym,
+                month_label=month_label,
+                categories=bucket["categories"],
+                total=_money(bucket["total"]),
+            )
+        )
+
+    return schemas.AnnualExpensesByCategoryResponse(year=year, items=items)
