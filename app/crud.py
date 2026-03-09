@@ -1,6 +1,6 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select, extract, func
-from datetime import date
+from datetime import date, time
 import calendar
 from . import models, schemas
 import logging
@@ -21,9 +21,24 @@ def _money(x: Decimal) -> Decimal:
 def _qty(x: Decimal) -> Decimal:
     return x.quantize(M3, rounding=ROUND_HALF_UP)
 
+
+def _minutes_between(start_time: time, end_time: time) -> int:
+    start_minutes = start_time.hour * 60 + start_time.minute
+    end_minutes = end_time.hour * 60 + end_time.minute
+
+    if end_minutes <= start_minutes:
+        raise ValueError("end_time must be greater than start_time")
+
+    return end_minutes - start_minutes
+
+
+def _amount_from_minutes(minutes: int, hourly_rate) -> Decimal:
+    hours = Decimal(str(minutes)) / Decimal("60")
+    rate = Decimal(str(hourly_rate))
+    return _money(hours * rate)
+
+
 # Categories
-
-
 def create_category(db: Session, data: schemas.CategoryCreate):
     obj = models.Category(name=data.name.strip())
     db.add(obj)
@@ -59,9 +74,8 @@ def delete_category(db: Session, category_id: int):
     db.delete(obj)
     db.commit()
 
+
 # Vendors
-
-
 def create_vendor(db: Session, data: schemas.VendorIn):
     obj = models.Vendor(name=data.name.strip())
     db.add(obj)
@@ -99,8 +113,6 @@ def delete_vendor(db: Session, vendor_id: int):
 
 
 # ---------- Expenses ----------
-
-
 def _compute_from_parts(unit_price, quantity, apply_tax_bool: bool):
     """
     Devuelve (subtotal, tax, total) usando Decimal y redondeo financiero.
@@ -121,7 +133,8 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
 
     # apply_tax: para helpers forzamos False
     apply_tax_bool = False if is_helpers else (
-        True if data.apply_tax is None else bool(data.apply_tax))
+        True if data.apply_tax is None else bool(data.apply_tax)
+    )
 
     # Normaliza strings
     desc = data.description.strip() if data.description else None
@@ -155,6 +168,7 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
         tax_amount = Decimal("0.00")
         total = subtotal
         unit = "hour" if not unit else unit
+
         # autodescripción si viene vacío
         if not desc:
             base = []
@@ -182,7 +196,7 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
                                ) if data.quantity is not None else None
             unit_price = Decimal(str(data.unit_price)
                                  ) if data.unit_price is not None else None
-            subtotal = None  # cuando viene total manual
+            subtotal = None
             tax_amount = Decimal("0.00")
 
     obj = models.Expense(
@@ -196,10 +210,12 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
             data.task_project or None),
 
         quantity=_qty(Decimal(str(data.quantity))) if data.quantity is not None else (
-            q if is_helpers else None),
+            q if is_helpers else None
+        ),
         unit=unit,
         unit_price=_money(Decimal(str(data.unit_price))) if data.unit_price is not None else (
-            p if is_helpers else None),
+            p if is_helpers else None
+        ),
 
         apply_tax=apply_tax_bool,
         subtotal=subtotal,
@@ -214,7 +230,8 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
 
         payment_account_id=data.payment_account_id,
         paid=paid if is_helpers else (
-            bool(data.paid) if data.paid is not None else False),
+            bool(data.paid) if data.paid is not None else False
+        ),
 
         total=total,
         notes=notes,
@@ -248,11 +265,25 @@ def list_expenses(
             E.date,
             E.category_id,
             E.vendor_id,
-            E.expense_type,
             E.description,
-            E.total,
+            E.helper_name,
+            E.task_project,
+            E.paid,
+            E.quantity,
+            E.unit,
+            E.unit_price,
+            E.apply_tax,
+            E.gallons_miles,
+            E.expense_type,
             E.payment_method,
+            E.receipt_url,
             E.payment_account_id,
+            E.subtotal,
+            E.tax_amount,
+            E.total,
+            E.notes,
+            E.created_at,
+            E.updated_at,
             C.name.label("category_name"),
             V.name.label("vendor_name"),
             PA.last4.label("payment_account_last4"),
@@ -261,24 +292,19 @@ def list_expenses(
         .outerjoin(C, E.category_id == C.id)
         .outerjoin(V, E.vendor_id == V.id)
         .outerjoin(PA, E.payment_account_id == PA.id)
-        .order_by(E.date.desc(), E.id.desc())
     )
 
-    # ---------- Filtros dinámicos ----------
     if category_id is not None:
         stmt = stmt.where(E.category_id == category_id)
 
     if month is not None:
-        # E.date es Date, usamos extract('month', date)
         stmt = stmt.where(extract("month", E.date) == month)
 
     if year is not None:
         stmt = stmt.where(extract("year", E.date) == year)
 
-    # Orden final (más reciente primero)
     stmt = stmt.order_by(E.date.desc(), E.id.desc())
 
-    # mappings() devuelve dicts por fila
     rows = db.execute(stmt).mappings().all()
     return [schemas.ExpenseOut(**row) for row in rows]
 
@@ -335,16 +361,12 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     has_parts = (obj.unit_price is not None and obj.quantity is not None)
 
     if is_helpers:
-        # Forzar sin TAX, total = horas * rate
         q = obj.quantity or Decimal("0")
         p = obj.unit_price or Decimal("0")
         obj.subtotal = _money(q * p)
         obj.tax_amount = Decimal("0.00")
         obj.total = obj.subtotal
         obj.apply_tax = False
-        # Vendor normalmente no aplica
-        # (si quieres forzarlo a NULL, descomenta la línea)
-        # obj.vendor_id = None
     else:
         if has_parts:
             sub, tax, tot = _compute_from_parts(
@@ -356,7 +378,6 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
             obj.tax_amount = tax
             obj.total = tot
         else:
-            # Permite total manual
             if data.total is not None:
                 obj.total = _money(Decimal(str(data.total)))
             obj.subtotal = None
@@ -366,9 +387,8 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     db.refresh(obj)
     return obj
 
+
 # ---------- Payment Accounts ----------
-
-
 def create_payment_account(db: Session, data: schemas.PaymentAccountIn):
     obj = models.PaymentAccount(
         name=data.name.strip(),
@@ -431,10 +451,6 @@ def delete_payment_account(db: Session, account_id: int):
 def report_annual_expenses_by_category(db: Session, year: int) -> schemas.AnnualExpensesByCategoryResponse:
     """
     Aggregate expenses by month and category for a given year.
-    Assumes:
-      - models.Expense has: date (date), total (Decimal), category_id (FK)
-      - models.Category has: id, name
-    Adjust joins/fields if your model names differ.
     """
     if not year:
         year = date.today().year
@@ -463,7 +479,7 @@ def report_annual_expenses_by_category(db: Session, year: int) -> schemas.Annual
                 "total": Decimal("0.00"),
             }
 
-        money_total = _money(total)  # usa tu helper para redondear
+        money_total = _money(total)
         buckets[ym_key]["categories"][category] = money_total
         buckets[ym_key]["total"] = _money(
             buckets[ym_key]["total"] + money_total)
@@ -484,3 +500,426 @@ def report_annual_expenses_by_category(db: Session, year: int) -> schemas.Annual
         )
 
     return schemas.AnnualExpensesByCategoryResponse(year=year, items=items)
+
+
+# ---------- Helpers ----------
+def get_helpers(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    is_active: Optional[bool] = None,
+):
+    q = db.query(models.Helper)
+
+    if is_active is not None:
+        q = q.filter(models.Helper.is_active == bool(is_active))
+
+    return q.order_by(models.Helper.first_name.asc(), models.Helper.last_name.asc()).offset(skip).limit(limit).all()
+
+
+def get_helper(db: Session, helper_id: int):
+    return db.get(models.Helper, helper_id)
+
+
+def create_helper(db: Session, helper_in: schemas.HelperCreate):
+    obj = models.Helper(
+        first_name=helper_in.first_name.strip(),
+        last_name=helper_in.last_name.strip() if helper_in.last_name else None,
+        phone=helper_in.phone.strip() if helper_in.phone else None,
+        email=helper_in.email.strip() if helper_in.email else None,
+        default_work_rate=_money(Decimal(str(helper_in.default_work_rate))),
+        default_travel_rate=_money(
+            Decimal(str(helper_in.default_travel_rate))),
+        is_active=bool(helper_in.is_active),
+        notes=helper_in.notes.strip() if helper_in.notes else None,
+    )
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def update_helper(db: Session, helper_id: int, helper_in: schemas.HelperUpdate):
+    obj = get_helper(db, helper_id)
+    if not obj:
+        return None
+
+    if helper_in.first_name is not None:
+        obj.first_name = helper_in.first_name.strip()
+    if helper_in.last_name is not None:
+        obj.last_name = helper_in.last_name.strip() if helper_in.last_name else None
+    if helper_in.phone is not None:
+        obj.phone = helper_in.phone.strip() if helper_in.phone else None
+    if helper_in.email is not None:
+        obj.email = helper_in.email.strip() if helper_in.email else None
+    if helper_in.default_work_rate is not None:
+        obj.default_work_rate = _money(
+            Decimal(str(helper_in.default_work_rate)))
+    if helper_in.default_travel_rate is not None:
+        obj.default_travel_rate = _money(
+            Decimal(str(helper_in.default_travel_rate)))
+    if helper_in.is_active is not None:
+        obj.is_active = bool(helper_in.is_active)
+    if helper_in.notes is not None:
+        obj.notes = helper_in.notes.strip() if helper_in.notes else None
+
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def delete_helper(db: Session, helper_id: int):
+    obj = get_helper(db, helper_id)
+    if not obj:
+        return False
+    db.delete(obj)
+    db.commit()
+    return True
+
+
+# ---------- Helper Time Entries ----------
+def get_helper_time_entries(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    helper_id: Optional[int] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    unassigned_only: bool = False,
+):
+    q = db.query(models.HelperTimeEntry)
+
+    if helper_id is not None:
+        q = q.filter(models.HelperTimeEntry.helper_id == helper_id)
+
+    if date_from is not None:
+        q = q.filter(models.HelperTimeEntry.work_date >= date_from)
+
+    if date_to is not None:
+        q = q.filter(models.HelperTimeEntry.work_date <= date_to)
+
+    if unassigned_only:
+        q = q.filter(models.HelperTimeEntry.helper_payroll_period_id.is_(None))
+
+    return q.order_by(
+        models.HelperTimeEntry.work_date.desc(),
+        models.HelperTimeEntry.start_time.desc(),
+        models.HelperTimeEntry.id.desc()
+    ).offset(skip).limit(limit).all()
+
+
+def get_helper_time_entry(db: Session, entry_id: int):
+    return db.get(models.HelperTimeEntry, entry_id)
+
+
+def create_helper_time_entry(db: Session, entry_in: schemas.HelperTimeEntryCreate):
+    helper = get_helper(db, entry_in.helper_id)
+    if not helper:
+        raise ValueError("Helper not found")
+
+    work_minutes = entry_in.work_minutes
+    if work_minutes is None:
+        if entry_in.start_time is not None and entry_in.end_time is not None:
+            work_minutes = _minutes_between(
+                entry_in.start_time, entry_in.end_time)
+        else:
+            work_minutes = 0
+
+    obj = models.HelperTimeEntry(
+        helper_id=entry_in.helper_id,
+        helper_payroll_period_id=entry_in.helper_payroll_period_id,
+        work_date=entry_in.work_date,
+        client_name=entry_in.client_name.strip(),
+        start_time=entry_in.start_time,
+        end_time=entry_in.end_time,
+        work_minutes=work_minutes,
+        travel_minutes=entry_in.travel_minutes if entry_in.travel_minutes is not None else 0,
+        notes=entry_in.notes.strip() if entry_in.notes else None,
+    )
+
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def update_helper_time_entry(db: Session, entry_id: int, entry_in: schemas.HelperTimeEntryUpdate):
+    obj = get_helper_time_entry(db, entry_id)
+    if not obj:
+        return None
+
+    if entry_in.helper_id is not None:
+        helper = get_helper(db, entry_in.helper_id)
+        if not helper:
+            raise ValueError("Helper not found")
+        obj.helper_id = entry_in.helper_id
+
+    if entry_in.helper_payroll_period_id is not None:
+        payroll = get_helper_payroll_period(
+            db, entry_in.helper_payroll_period_id)
+        if not payroll:
+            raise ValueError("Helper payroll period not found")
+        obj.helper_payroll_period_id = entry_in.helper_payroll_period_id
+
+    if entry_in.work_date is not None:
+        obj.work_date = entry_in.work_date
+
+    if entry_in.client_name is not None:
+        obj.client_name = entry_in.client_name.strip()
+
+    if entry_in.start_time is not None:
+        obj.start_time = entry_in.start_time
+
+    if entry_in.end_time is not None:
+        obj.end_time = entry_in.end_time
+
+    if entry_in.travel_minutes is not None:
+        obj.travel_minutes = entry_in.travel_minutes
+
+    if entry_in.notes is not None:
+        obj.notes = entry_in.notes.strip() if entry_in.notes else None
+
+    if entry_in.work_minutes is not None:
+        obj.work_minutes = entry_in.work_minutes
+    elif obj.start_time is not None and obj.end_time is not None:
+        obj.work_minutes = _minutes_between(obj.start_time, obj.end_time)
+    else:
+        obj.work_minutes = 0
+
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def delete_helper_time_entry(db: Session, entry_id: int):
+    obj = get_helper_time_entry(db, entry_id)
+    if not obj:
+        return False
+    db.delete(obj)
+    db.commit()
+    return True
+
+
+# ---------- Helper Payroll Periods ----------
+def get_helper_payroll_periods(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    helper_id: Optional[int] = None,
+    status: Optional[str] = None,
+):
+    q = (
+        db.query(models.HelperPayrollPeriod)
+        .options(joinedload(models.HelperPayrollPeriod.helper))
+    )
+
+    if helper_id is not None:
+        q = q.filter(models.HelperPayrollPeriod.helper_id == helper_id)
+
+    if status is not None:
+        q = q.filter(models.HelperPayrollPeriod.status == status)
+
+    return q.order_by(
+        models.HelperPayrollPeriod.period_start.desc(),
+        models.HelperPayrollPeriod.id.desc()
+    ).offset(skip).limit(limit).all()
+
+
+def get_helper_payroll_period(db: Session, payroll_id: int):
+    return db.get(models.HelperPayrollPeriod, payroll_id)
+
+
+def create_helper_payroll_period(db: Session, payroll_in: schemas.HelperPayrollPeriodCreate):
+    helper = get_helper(db, payroll_in.helper_id)
+    if not helper:
+        raise ValueError("Helper not found")
+
+    existing = db.query(models.HelperPayrollPeriod).filter(
+        models.HelperPayrollPeriod.helper_id == payroll_in.helper_id,
+        models.HelperPayrollPeriod.period_start == payroll_in.period_start,
+        models.HelperPayrollPeriod.period_end == payroll_in.period_end,
+    ).first()
+
+    if existing:
+        raise ValueError(
+            "A payroll period already exists for this helper and date range")
+
+    obj = models.HelperPayrollPeriod(
+        helper_id=payroll_in.helper_id,
+        period_start=payroll_in.period_start,
+        period_end=payroll_in.period_end,
+        pay_date=payroll_in.pay_date,
+        work_rate=_money(Decimal(str(payroll_in.work_rate))),
+        travel_rate=_money(Decimal(str(payroll_in.travel_rate))),
+        total_work_minutes=payroll_in.total_work_minutes,
+        total_travel_minutes=payroll_in.total_travel_minutes,
+        work_amount=_money(Decimal(str(payroll_in.work_amount))),
+        travel_amount=_money(Decimal(str(payroll_in.travel_amount))),
+        total_amount=_money(Decimal(str(payroll_in.total_amount))),
+        status=payroll_in.status,
+        notes=payroll_in.notes.strip() if payroll_in.notes else None,
+    )
+
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def update_helper_payroll_period(db: Session, payroll_id: int, payroll_in: schemas.HelperPayrollPeriodUpdate):
+    obj = get_helper_payroll_period(db, payroll_id)
+    if not obj:
+        return None
+
+    if payroll_in.helper_id is not None:
+        helper = get_helper(db, payroll_in.helper_id)
+        if not helper:
+            raise ValueError("Helper not found")
+        obj.helper_id = payroll_in.helper_id
+
+    if payroll_in.period_start is not None:
+        obj.period_start = payroll_in.period_start
+
+    if payroll_in.period_end is not None:
+        obj.period_end = payroll_in.period_end
+
+    if payroll_in.pay_date is not None:
+        obj.pay_date = payroll_in.pay_date
+
+    if payroll_in.work_rate is not None:
+        obj.work_rate = _money(Decimal(str(payroll_in.work_rate)))
+
+    if payroll_in.travel_rate is not None:
+        obj.travel_rate = _money(Decimal(str(payroll_in.travel_rate)))
+
+    if payroll_in.total_work_minutes is not None:
+        obj.total_work_minutes = payroll_in.total_work_minutes
+
+    if payroll_in.total_travel_minutes is not None:
+        obj.total_travel_minutes = payroll_in.total_travel_minutes
+
+    if payroll_in.work_amount is not None:
+        obj.work_amount = _money(Decimal(str(payroll_in.work_amount)))
+
+    if payroll_in.travel_amount is not None:
+        obj.travel_amount = _money(Decimal(str(payroll_in.travel_amount)))
+
+    if payroll_in.total_amount is not None:
+        obj.total_amount = _money(Decimal(str(payroll_in.total_amount)))
+
+    if payroll_in.status is not None:
+        obj.status = payroll_in.status
+
+    if payroll_in.notes is not None:
+        obj.notes = payroll_in.notes.strip() if payroll_in.notes else None
+
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def delete_helper_payroll_period(db: Session, payroll_id: int):
+    obj = get_helper_payroll_period(db, payroll_id)
+    if not obj:
+        return False
+
+    db.query(models.HelperTimeEntry).filter(
+        models.HelperTimeEntry.helper_payroll_period_id == payroll_id
+    ).update(
+        {models.HelperTimeEntry.helper_payroll_period_id: None},
+        synchronize_session=False
+    )
+
+    db.delete(obj)
+    db.commit()
+    return True
+
+
+def generate_helper_payroll_period(
+    db: Session,
+    helper_id: int,
+    period_start: date,
+    period_end: date,
+    pay_date: Optional[date] = None,
+):
+    helper = get_helper(db, helper_id)
+    if not helper:
+        raise ValueError("Helper not found")
+
+    existing = db.query(models.HelperPayrollPeriod).filter(
+        models.HelperPayrollPeriod.helper_id == helper_id,
+        models.HelperPayrollPeriod.period_start == period_start,
+        models.HelperPayrollPeriod.period_end == period_end,
+    ).first()
+
+    if existing:
+        raise ValueError(
+            "A payroll period already exists for this helper and date range")
+
+    entries = db.query(models.HelperTimeEntry).filter(
+        models.HelperTimeEntry.helper_id == helper_id,
+        models.HelperTimeEntry.work_date >= period_start,
+        models.HelperTimeEntry.work_date <= period_end,
+        models.HelperTimeEntry.helper_payroll_period_id.is_(None),
+    ).order_by(
+        models.HelperTimeEntry.work_date.asc(),
+        models.HelperTimeEntry.start_time.asc(),
+        models.HelperTimeEntry.id.asc()
+    ).all()
+
+    if not entries:
+        return None
+
+    total_work_minutes = sum(int(entry.work_minutes or 0) for entry in entries)
+    total_travel_minutes = sum(int(entry.travel_minutes or 0)
+                               for entry in entries)
+
+    work_rate = _money(Decimal(str(helper.default_work_rate)))
+    travel_rate = _money(Decimal(str(helper.default_travel_rate)))
+
+    work_amount = _amount_from_minutes(total_work_minutes, work_rate)
+    travel_amount = _amount_from_minutes(total_travel_minutes, travel_rate)
+    total_amount = _money(work_amount + travel_amount)
+
+    payroll = models.HelperPayrollPeriod(
+        helper_id=helper_id,
+        period_start=period_start,
+        period_end=period_end,
+        pay_date=pay_date,
+        work_rate=work_rate,
+        travel_rate=travel_rate,
+        total_work_minutes=total_work_minutes,
+        total_travel_minutes=total_travel_minutes,
+        work_amount=work_amount,
+        travel_amount=travel_amount,
+        total_amount=total_amount,
+        status="Ready",
+        notes=None,
+    )
+
+    db.add(payroll)
+    db.flush()
+
+    for entry in entries:
+        entry.helper_payroll_period_id = payroll.id
+
+    db.commit()
+    db.refresh(payroll)
+    return payroll
+
+
+def mark_helper_payroll_period_paid(
+    db: Session,
+    payroll_id: int,
+    pay_date: date,
+):
+    payroll = get_helper_payroll_period(db, payroll_id)
+    if not payroll:
+        return None
+
+    payroll.pay_date = pay_date
+    payroll.status = "Paid"
+
+    db.commit()
+    db.refresh(payroll)
+    return payroll
