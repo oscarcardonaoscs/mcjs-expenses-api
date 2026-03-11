@@ -34,7 +34,16 @@ def get_client(client_id: int, db: Session = Depends(get_db)):
     status_code=status.HTTP_201_CREATED,
 )
 def create_client(client: schemas.ClientCreate, db: Session = Depends(get_db)):
-    return crud.create_client(db=db, client=client)
+
+    existing_client = crud.get_client_by_name(db, client.name)
+
+    if existing_client:
+        raise HTTPException(
+            status_code=400,
+            detail="A client with this name already exists."
+        )
+
+    return crud.create_client(db, client)
 
 
 @router.put("/{client_id}", response_model=schemas.ClientResponse)

@@ -1107,6 +1107,14 @@ def get_client(db: Session, client_id: int):
     return db.query(models.Client).filter(models.Client.id == client_id).first()
 
 
+def get_client_by_name(db: Session, name: str):
+    return (
+        db.query(models.Client)
+        .filter(func.lower(models.Client.name) == name.lower())
+        .first()
+    )
+
+
 def create_client(db: Session, client: schemas.ClientCreate):
     db_client = models.Client(**client.dict())
     db.add(db_client)
