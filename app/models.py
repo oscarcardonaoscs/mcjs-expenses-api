@@ -4,7 +4,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from decimal import Decimal, ROUND_HALF_UP
 from .db import Base
+
+
+def _money(x):
+    if x is None:
+        return Decimal("0.00")
+    return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 class Category(Base):
@@ -39,8 +46,12 @@ class PaymentAccount(Base):
     last4 = Column(String(4))
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(),
-                        onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False
+    )
 
     expenses = relationship("Expense", back_populates="payment_account")
 
@@ -95,8 +106,12 @@ class Expense(Base):
     notes = Column(Text, nullable=True)
 
     created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False,
-                        server_default=func.now(), onupdate=func.now())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now()
+    )
 
     category = relationship("Category", back_populates="expenses")
     vendor = relationship("Vendor", back_populates="expenses")
@@ -112,12 +127,17 @@ class Helper(Base):
     phone = Column(String(30), nullable=True)
     email = Column(String(150), nullable=True)
     default_work_rate = Column(DECIMAL(10, 2), nullable=False, default=15.00)
-    default_travel_rate = Column(DECIMAL(10, 2), nullable=False, default=7.25)
+    default_travel_rate = Column(
+        DECIMAL(10, 2), nullable=False, default=7.25)
     is_active = Column(Boolean, nullable=False, default=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False,
-                        server_default=func.now(), onupdate=func.now())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now()
+    )
 
     time_entries = relationship(
         "HelperTimeEntry",
@@ -170,8 +190,12 @@ class HelperPayrollPeriod(Base):
 
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False,
-                        server_default=func.now(), onupdate=func.now())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now()
+    )
 
     helper = relationship("Helper", back_populates="payroll_periods")
 
@@ -218,9 +242,9 @@ class HelperTimeEntry(Base):
         nullable=True,
         index=True
     )
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
 
     work_date = Column(Date, nullable=False)
-    client_name = Column(String(200), nullable=False)
     start_time = Column(Time, nullable=False)
     end_time = Column(Time, nullable=False)
     work_minutes = Column(Integer, nullable=False, default=0)
@@ -228,15 +252,73 @@ class HelperTimeEntry(Base):
     notes = Column(Text, nullable=True)
 
     created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False,
-                        server_default=func.now(), onupdate=func.now())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now()
+    )
 
     helper = relationship("Helper", back_populates="time_entries")
+    client = relationship("Client")
     payroll_period = relationship(
-        "HelperPayrollPeriod", back_populates="time_entries")
+        "HelperPayrollPeriod",
+        back_populates="time_entries"
+    )
+
+    @property
+    def work_hours(self):
+        hours = Decimal(str(self.work_minutes or 0)) / Decimal("60")
+        return hours.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+
+    @property
+    def travel_hours(self):
+        hours = Decimal(str(self.travel_minutes or 0)) / Decimal("60")
+        return hours.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+
+    @property
+    def work_rate(self):
+        if self.payroll_period and self.payroll_period.work_rate is not None:
+            return _money(self.payroll_period.work_rate)
+
+        if self.helper and self.helper.default_work_rate is not None:
+            return _money(self.helper.default_work_rate)
+
+        return Decimal("0.00")
+
+    @property
+    def travel_rate(self):
+        if self.payroll_period and self.payroll_period.travel_rate is not None:
+            return _money(self.payroll_period.travel_rate)
+
+        if self.helper and self.helper.default_travel_rate is not None:
+            return _money(self.helper.default_travel_rate)
+
+        return Decimal("0.00")
+
+    @property
+    def line_total(self):
+        work_amount = self.work_hours * self.work_rate
+        travel_amount = self.travel_hours * self.travel_rate
+        return _money(work_amount + travel_amount)
 
     __table_args__ = (
         Index("idx_helper_time_entries_work_date", "work_date"),
         Index("idx_helper_time_entries_helper_date", "helper_id", "work_date"),
-        Index("idx_helper_time_entries_client_name", "client_name"),
+    )
+
+
+class Client(Base):
+    __tablename__ = "clients"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )

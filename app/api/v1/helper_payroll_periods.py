@@ -1,4 +1,3 @@
-from datetime import date
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,8 +7,10 @@ from app.db import get_db
 from app import crud, schemas
 
 
-router = APIRouter(prefix="/helper-payroll-periods",
-                   tags=["Helper Payroll Periods"])
+router = APIRouter(
+    prefix="/helper-payroll-periods",
+    tags=["Helper Payroll Periods"]
+)
 
 
 @router.get("/", response_model=List[schemas.HelperPayrollPeriodResponse])
@@ -29,7 +30,10 @@ def get_helper_payroll_periods(
     )
 
 
-@router.get("/{payroll_id}", response_model=schemas.HelperPayrollPeriodResponse)
+@router.get(
+    "/{payroll_id}",
+    response_model=schemas.HelperPayrollPeriodDetailResponse
+)
 def get_helper_payroll_period(payroll_id: int, db: Session = Depends(get_db)):
     payroll = crud.get_helper_payroll_period(db=db, payroll_id=payroll_id)
     if not payroll:
@@ -40,7 +44,11 @@ def get_helper_payroll_period(payroll_id: int, db: Session = Depends(get_db)):
     return payroll
 
 
-@router.post("/", response_model=schemas.HelperPayrollPeriodResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=schemas.HelperPayrollPeriodResponse,
+    status_code=status.HTTP_201_CREATED
+)
 def create_helper_payroll_period(
     payroll_in: schemas.HelperPayrollPeriodCreate,
     db: Session = Depends(get_db),
@@ -85,7 +93,11 @@ def delete_helper_payroll_period(payroll_id: int, db: Session = Depends(get_db))
     return {"message": "Helper payroll period deleted successfully"}
 
 
-@router.post("/generate", response_model=schemas.HelperPayrollPeriodResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/generate",
+    response_model=schemas.HelperPayrollPeriodResponse,
+    status_code=status.HTTP_201_CREATED
+)
 def generate_helper_payroll_period(
     payload: schemas.HelperPayrollGenerateRequest,
     db: Session = Depends(get_db),
@@ -114,7 +126,10 @@ def generate_helper_payroll_period(
     return payroll
 
 
-@router.post("/{payroll_id}/mark-paid", response_model=schemas.HelperPayrollPeriodResponse)
+@router.post(
+    "/{payroll_id}/mark-paid",
+    response_model=schemas.HelperPayrollPeriodResponse
+)
 def mark_helper_payroll_period_paid(
     payroll_id: int,
     payload: schemas.HelperPayrollMarkPaidRequest,

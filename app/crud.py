@@ -38,7 +38,99 @@ def _amount_from_minutes(minutes: int, hourly_rate) -> Decimal:
     return _money(hours * rate)
 
 
+def _time_to_minutes(value: Optional[time]) -> Optional[int]:
+    if value is None:
+        return None
+    return value.hour * 60 + value.minute
+
+
+def _recalculate_helper_time_entries_for_day(
+    db: Session,
+    helper_id: int,
+    work_date: date,
+):
+    entries = (
+        db.query(models.HelperTimeEntry)
+        .filter(
+            models.HelperTimeEntry.helper_id == helper_id,
+            models.HelperTimeEntry.work_date == work_date,
+        )
+        .order_by(
+            models.HelperTimeEntry.start_time.asc(),
+            models.HelperTimeEntry.id.asc(),
+        )
+        .all()
+    )
+
+    previous_end_minutes = None
+
+    for entry in entries:
+        start_minutes = _time_to_minutes(entry.start_time)
+        end_minutes = _time_to_minutes(entry.end_time)
+
+        if entry.start_time is not None and entry.end_time is not None:
+            entry.work_minutes = _minutes_between(
+                entry.start_time, entry.end_time)
+        else:
+            entry.work_minutes = int(entry.work_minutes or 0)
+
+        if start_minutes is None or previous_end_minutes is None:
+            entry.travel_minutes = 0
+        else:
+            travel_minutes = start_minutes - previous_end_minutes
+            entry.travel_minutes = travel_minutes if travel_minutes > 0 else 0
+
+        previous_end_minutes = end_minutes
+
+    db.commit()
+
+    for entry in entries:
+        db.refresh(entry)
+
+    return entries
+
+
+def _recalculate_helper_payroll_period_totals(
+    db: Session,
+    payroll_id: int,
+):
+    payroll = (
+        db.query(models.HelperPayrollPeriod)
+        .options(joinedload(models.HelperPayrollPeriod.helper))
+        .filter(models.HelperPayrollPeriod.id == payroll_id)
+        .first()
+    )
+
+    if not payroll:
+        return None
+
+    entries = (
+        db.query(models.HelperTimeEntry)
+        .filter(models.HelperTimeEntry.helper_payroll_period_id == payroll_id)
+        .all()
+    )
+
+    total_work_minutes = sum(int(entry.work_minutes or 0) for entry in entries)
+    total_travel_minutes = sum(int(entry.travel_minutes or 0)
+                               for entry in entries)
+
+    work_rate = Decimal(str(payroll.work_rate or 0))
+    travel_rate = Decimal(str(payroll.travel_rate or 0))
+
+    payroll.total_work_minutes = total_work_minutes
+    payroll.total_travel_minutes = total_travel_minutes
+    payroll.work_amount = _amount_from_minutes(total_work_minutes, work_rate)
+    payroll.travel_amount = _amount_from_minutes(
+        total_travel_minutes, travel_rate)
+    payroll.total_amount = _money(payroll.work_amount + payroll.travel_amount)
+
+    db.commit()
+    db.refresh(payroll)
+    return payroll
+
 # Categories
+
+
 def create_category(db: Session, data: schemas.CategoryCreate):
     obj = models.Category(name=data.name.strip())
     db.add(obj)
@@ -128,36 +220,29 @@ def _compute_from_parts(unit_price, quantity, apply_tax_bool: bool):
 def create_expense(db: Session, data: schemas.ExpenseCreate):
     logger.info("[create_expense] Received data: %s", data.model_dump())
 
-    # Helpers?
     is_helpers = (data.expense_type or "").strip().lower() == "helpers"
 
-    # apply_tax: para helpers forzamos False
     apply_tax_bool = False if is_helpers else (
         True if data.apply_tax is None else bool(data.apply_tax)
     )
 
-    # Normaliza strings
     desc = data.description.strip() if data.description else None
     unit = data.unit.strip() if data.unit else None
     exp_type = data.expense_type.strip() if data.expense_type else None
     receipt = data.receipt_url.strip() if data.receipt_url else None
     notes = data.notes.strip() if data.notes else None
 
-    # Helpers extras
     helper_name = (data.helper_name or "").strip() or None
     task_project = (data.task_project or "").strip() or None
     paid = bool(data.paid) if data.paid is not None else False
 
-    # Vendor: en Helpers normalmente no aplica
     vendor_id = None if is_helpers else data.vendor_id
 
     subtotal = None
     tax_amount = Decimal("0.00")
     total = None
 
-    # ---- MONTOS ----
     if is_helpers:
-        # Requiere horas y rate (quantity y unit_price)
         q = Decimal(str(data.quantity)
                     ) if data.quantity is not None else Decimal("0")
         p = Decimal(str(data.unit_price)
@@ -169,7 +254,6 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
         total = subtotal
         unit = "hour" if not unit else unit
 
-        # autodescripción si viene vacío
         if not desc:
             base = []
             if helper_name:
@@ -178,7 +262,6 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
                 base.append(task_project)
             desc = " - ".join(base) or "Helpers payment"
     else:
-        # No-Helpers: partes o total manual
         if data.unit_price is not None and data.quantity is not None:
             subtotal, tax_amount, total = _compute_from_parts(
                 unit_price=data.unit_price,
@@ -314,7 +397,6 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if not obj:
         raise ValueError("Expense not found")
 
-    # Cambios simples
     if data.date is not None:
         obj.date = data.date
     if data.category_id is not None:
@@ -333,7 +415,6 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if data.notes is not None:
         obj.notes = data.notes.strip() if data.notes else None
 
-    # Helpers extras
     if data.helper_name is not None:
         obj.helper_name = data.helper_name.strip() if data.helper_name else None
     if data.task_project is not None:
@@ -346,7 +427,6 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if data.payment_account_id is not None:
         obj.payment_account_id = data.payment_account_id
 
-    # Numéricos
     if data.quantity is not None:
         obj.quantity = _qty(Decimal(str(data.quantity)))
     if data.unit_price is not None:
@@ -356,7 +436,6 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if data.apply_tax is not None:
         obj.apply_tax = bool(data.apply_tax)
 
-    # ---- Reglas por tipo ----
     is_helpers = (obj.expense_type or "").strip().lower() == "helpers"
     has_parts = (obj.unit_price is not None and obj.quantity is not None)
 
@@ -514,7 +593,10 @@ def get_helpers(
     if is_active is not None:
         q = q.filter(models.Helper.is_active == bool(is_active))
 
-    return q.order_by(models.Helper.first_name.asc(), models.Helper.last_name.asc()).offset(skip).limit(limit).all()
+    return q.order_by(
+        models.Helper.first_name.asc(),
+        models.Helper.last_name.asc()
+    ).offset(skip).limit(limit).all()
 
 
 def get_helper(db: Session, helper_id: int):
@@ -617,28 +699,47 @@ def create_helper_time_entry(db: Session, entry_in: schemas.HelperTimeEntryCreat
     if not helper:
         raise ValueError("Helper not found")
 
+    client = get_client(db, entry_in.client_id)
+    if not client:
+        raise ValueError("Client not found")
+
+    if entry_in.helper_payroll_period_id is not None:
+        payroll = get_helper_payroll_period(
+            db, entry_in.helper_payroll_period_id)
+        if not payroll:
+            raise ValueError("Helper payroll period not found")
+
     work_minutes = entry_in.work_minutes
     if work_minutes is None:
         if entry_in.start_time is not None and entry_in.end_time is not None:
             work_minutes = _minutes_between(
-                entry_in.start_time, entry_in.end_time)
+                entry_in.start_time, entry_in.end_time
+            )
         else:
             work_minutes = 0
 
     obj = models.HelperTimeEntry(
         helper_id=entry_in.helper_id,
+        client_id=entry_in.client_id,
         helper_payroll_period_id=entry_in.helper_payroll_period_id,
         work_date=entry_in.work_date,
-        client_name=entry_in.client_name.strip(),
         start_time=entry_in.start_time,
         end_time=entry_in.end_time,
         work_minutes=work_minutes,
-        travel_minutes=entry_in.travel_minutes if entry_in.travel_minutes is not None else 0,
+        travel_minutes=0,
         notes=entry_in.notes.strip() if entry_in.notes else None,
     )
 
     db.add(obj)
     db.commit()
+    db.refresh(obj)
+
+    _recalculate_helper_time_entries_for_day(
+        db=db,
+        helper_id=obj.helper_id,
+        work_date=obj.work_date,
+    )
+
     db.refresh(obj)
     return obj
 
@@ -648,15 +749,26 @@ def update_helper_time_entry(db: Session, entry_id: int, entry_in: schemas.Helpe
     if not obj:
         return None
 
+    old_helper_id = obj.helper_id
+    old_work_date = obj.work_date
+    old_payroll_period_id = obj.helper_payroll_period_id
+
     if entry_in.helper_id is not None:
         helper = get_helper(db, entry_in.helper_id)
         if not helper:
             raise ValueError("Helper not found")
         obj.helper_id = entry_in.helper_id
 
+    if entry_in.client_id is not None:
+        client = get_client(db, entry_in.client_id)
+        if not client:
+            raise ValueError("Client not found")
+        obj.client_id = entry_in.client_id
+
     if entry_in.helper_payroll_period_id is not None:
         payroll = get_helper_payroll_period(
-            db, entry_in.helper_payroll_period_id)
+            db, entry_in.helper_payroll_period_id
+        )
         if not payroll:
             raise ValueError("Helper payroll period not found")
         obj.helper_payroll_period_id = entry_in.helper_payroll_period_id
@@ -664,17 +776,11 @@ def update_helper_time_entry(db: Session, entry_id: int, entry_in: schemas.Helpe
     if entry_in.work_date is not None:
         obj.work_date = entry_in.work_date
 
-    if entry_in.client_name is not None:
-        obj.client_name = entry_in.client_name.strip()
-
     if entry_in.start_time is not None:
         obj.start_time = entry_in.start_time
 
     if entry_in.end_time is not None:
         obj.end_time = entry_in.end_time
-
-    if entry_in.travel_minutes is not None:
-        obj.travel_minutes = entry_in.travel_minutes
 
     if entry_in.notes is not None:
         obj.notes = entry_in.notes.strip() if entry_in.notes else None
@@ -688,6 +794,36 @@ def update_helper_time_entry(db: Session, entry_id: int, entry_in: schemas.Helpe
 
     db.commit()
     db.refresh(obj)
+
+    _recalculate_helper_time_entries_for_day(
+        db=db,
+        helper_id=old_helper_id,
+        work_date=old_work_date,
+    )
+
+    if old_helper_id != obj.helper_id or old_work_date != obj.work_date:
+        _recalculate_helper_time_entries_for_day(
+            db=db,
+            helper_id=obj.helper_id,
+            work_date=obj.work_date,
+        )
+
+    if old_payroll_period_id is not None:
+        _recalculate_helper_payroll_period_totals(
+            db=db,
+            payroll_id=old_payroll_period_id,
+        )
+
+    if (
+        obj.helper_payroll_period_id is not None
+        and obj.helper_payroll_period_id != old_payroll_period_id
+    ):
+        _recalculate_helper_payroll_period_totals(
+            db=db,
+            payroll_id=obj.helper_payroll_period_id,
+        )
+
+    db.refresh(obj)
     return obj
 
 
@@ -695,8 +831,26 @@ def delete_helper_time_entry(db: Session, entry_id: int):
     obj = get_helper_time_entry(db, entry_id)
     if not obj:
         return False
+
+    helper_id = obj.helper_id
+    work_date = obj.work_date
+    payroll_id = obj.helper_payroll_period_id
+
     db.delete(obj)
     db.commit()
+
+    _recalculate_helper_time_entries_for_day(
+        db=db,
+        helper_id=helper_id,
+        work_date=work_date,
+    )
+
+    if payroll_id is not None:
+        _recalculate_helper_payroll_period_totals(
+            db=db,
+            payroll_id=payroll_id,
+        )
+
     return True
 
 
@@ -726,7 +880,20 @@ def get_helper_payroll_periods(
 
 
 def get_helper_payroll_period(db: Session, payroll_id: int):
-    return db.get(models.HelperPayrollPeriod, payroll_id)
+    return (
+        db.query(models.HelperPayrollPeriod)
+        .options(
+            joinedload(models.HelperPayrollPeriod.helper),
+            joinedload(models.HelperPayrollPeriod.time_entries).joinedload(
+                models.HelperTimeEntry.helper
+            ),
+            joinedload(models.HelperPayrollPeriod.time_entries).joinedload(
+                models.HelperTimeEntry.payroll_period
+            ),
+        )
+        .filter(models.HelperPayrollPeriod.id == payroll_id)
+        .first()
+    )
 
 
 def create_helper_payroll_period(db: Session, payroll_in: schemas.HelperPayrollPeriodCreate):
@@ -904,6 +1071,7 @@ def generate_helper_payroll_period(
         entry.helper_payroll_period_id = payroll.id
 
     db.commit()
+    _recalculate_helper_payroll_period_totals(db=db, payroll_id=payroll.id)
     db.refresh(payroll)
     return payroll
 
@@ -923,3 +1091,54 @@ def mark_helper_payroll_period_paid(
     db.commit()
     db.refresh(payroll)
     return payroll
+
+
+def get_clients(db: Session, skip: int = 0, limit: int = 100):
+    return (
+        db.query(models.Client)
+        .order_by(models.Client.name)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_client(db: Session, client_id: int):
+    return db.query(models.Client).filter(models.Client.id == client_id).first()
+
+
+def create_client(db: Session, client: schemas.ClientCreate):
+    db_client = models.Client(**client.dict())
+    db.add(db_client)
+    db.commit()
+    db.refresh(db_client)
+    return db_client
+
+
+def update_client(db: Session, client_id: int, client: schemas.ClientUpdate):
+    db_client = get_client(db, client_id)
+
+    if not db_client:
+        return None
+
+    update_data = client.dict(exclude_unset=True)
+
+    for key, value in update_data.items():
+        setattr(db_client, key, value)
+
+    db.commit()
+    db.refresh(db_client)
+
+    return db_client
+
+
+def delete_client(db: Session, client_id: int):
+    db_client = get_client(db, client_id)
+
+    if not db_client:
+        return None
+
+    db.delete(db_client)
+    db.commit()
+
+    return db_client

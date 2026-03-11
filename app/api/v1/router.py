@@ -10,6 +10,8 @@ from .helpers import router as helpers_router
 from .helper_time_entries import router as helper_time_entries_router
 from .helper_payroll_periods import router as helper_payroll_periods_router
 
+from .clients import router as clients_router
+
 api = APIRouter()
 
 api.include_router(expenses_router)
@@ -21,3 +23,5 @@ api.include_router(reports_router)
 api.include_router(helpers_router)
 api.include_router(helper_time_entries_router)
 api.include_router(helper_payroll_periods_router)
+
+api.include_router(clients_router)

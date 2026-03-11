@@ -118,13 +118,12 @@ class ExpenseCreate(BaseModel):
 
     quantity: Optional[DecimalQty] = None
     unit: Optional[str] = None
-    # unit_price es dinero, no cantidad
     unit_price: Optional[DecimalMoney] = None
 
     apply_tax: Optional[bool] = True
     gallons_miles: Optional[DecimalQty] = None
 
-    expense_type: Optional[str] = None  # p.ej., "Helpers"
+    expense_type: Optional[str] = None
     payment_method: Optional[PaymentMethod] = None
     receipt_url: Optional[str] = None
 
@@ -141,7 +140,6 @@ class ExpenseUpdate(BaseModel):
 
     description: Optional[str] = None
 
-    # Helpers / Payroll
     helper_name: Optional[constr(strip_whitespace=True, max_length=100)] = None
     task_project: Optional[constr(
         strip_whitespace=True, max_length=120)] = None
@@ -173,7 +171,6 @@ class ExpenseOut(BaseModel):
 
     description: Optional[str] = None
 
-    # Helpers / Payroll
     helper_name: Optional[str] = None
     task_project: Optional[str] = None
     paid: Optional[bool] = None
@@ -211,7 +208,6 @@ class ListResponse(BaseModel):
 
 
 class MonthlyCategoryTotals(BaseModel):
-    # "2025-01"
     month: str = Field(..., pattern=r"^\d{4}-\d{2}$")
     month_label: str
     categories: Dict[str, DecimalMoney]
@@ -270,9 +266,9 @@ class HelpersListResponse(BaseModel):
 # ---------- Helper Time Entries ----------
 class HelperTimeEntryBase(BaseModel):
     helper_id: int
+    client_id: int
     helper_payroll_period_id: Optional[int] = None
     work_date: date
-    client_name: constr(strip_whitespace=True, min_length=1, max_length=200)
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     work_minutes: Optional[int] = Field(default=None, ge=0)
@@ -303,8 +299,7 @@ class HelperTimeEntryUpdate(BaseModel):
     helper_id: Optional[int] = None
     helper_payroll_period_id: Optional[int] = None
     work_date: Optional[date] = None
-    client_name: Optional[constr(strip_whitespace=True,
-                                 min_length=1, max_length=200)] = None
+    client_id: Optional[int] = None
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     work_minutes: Optional[int] = Field(default=None, ge=0)
@@ -332,11 +327,35 @@ class HelperTimeEntryResponse(BaseModel):
     helper_id: int
     helper_payroll_period_id: Optional[int] = None
     work_date: date
-    client_name: str
+    client_id: int
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     work_minutes: int
     travel_minutes: int
+    notes: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class HelperTimeEntryPayrollDetailResponse(BaseModel):
+    id: int
+    helper_id: int
+    helper_payroll_period_id: Optional[int] = None
+    work_date: date
+    client_name: str
+    description: Optional[str] = None
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    work_minutes: int
+    travel_minutes: int
+    work_hours: DecimalMoney
+    travel_hours: DecimalMoney
+    work_rate: DecimalMoney
+    travel_rate: DecimalMoney
+    line_total: DecimalMoney
     notes: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -423,6 +442,30 @@ class HelperPayrollPeriodResponse(BaseModel):
         from_attributes = True
 
 
+class HelperPayrollPeriodDetailResponse(BaseModel):
+    id: int
+    helper_id: int
+    helper_name: Optional[str] = None
+    period_start: date
+    period_end: date
+    pay_date: Optional[date] = None
+    work_rate: DecimalMoney
+    travel_rate: DecimalMoney
+    total_work_minutes: int
+    total_travel_minutes: int
+    work_amount: DecimalMoney
+    travel_amount: DecimalMoney
+    total_amount: DecimalMoney
+    status: HelperPayrollStatus
+    notes: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    time_entries: List[HelperTimeEntryPayrollDetailResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
 class HelperPayrollPeriodsListResponse(BaseModel):
     items: List[HelperPayrollPeriodResponse]
 
@@ -443,3 +486,26 @@ class HelperPayrollGenerateRequest(BaseModel):
 
 class HelperPayrollMarkPaidRequest(BaseModel):
     pay_date: date
+
+
+class ClientBase(BaseModel):
+    name: str
+    is_active: bool = True
+
+
+class ClientCreate(ClientBase):
+    pass
+
+
+class ClientUpdate(BaseModel):
+    name: str | None = None
+    is_active: bool | None = None
+
+
+class ClientResponse(ClientBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True

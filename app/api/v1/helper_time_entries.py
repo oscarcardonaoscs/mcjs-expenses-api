@@ -54,7 +54,13 @@ def create_helper_time_entry(
             detail="Helper not found",
         )
 
-    return crud.create_helper_time_entry(db=db, entry_in=entry_in)
+    try:
+        return crud.create_helper_time_entry(db=db, entry_in=entry_in)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
 
 
 @router.put("/{entry_id}", response_model=schemas.HelperTimeEntryResponse)
@@ -63,13 +69,24 @@ def update_helper_time_entry(
     entry_in: schemas.HelperTimeEntryUpdate,
     db: Session = Depends(get_db),
 ):
-    entry = crud.update_helper_time_entry(
-        db=db, entry_id=entry_id, entry_in=entry_in)
+    try:
+        entry = crud.update_helper_time_entry(
+            db=db,
+            entry_id=entry_id,
+            entry_in=entry_in,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Helper time entry not found",
         )
+
     return entry
 
 
