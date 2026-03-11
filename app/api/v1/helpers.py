@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app import crud, schemas
+from typing import Optional
 
 router = APIRouter(prefix="/helpers", tags=["Helpers"])
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/helpers", tags=["Helpers"])
 def get_helpers(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    is_active: bool | None = Query(None),
+    is_active: Optional[bool] = Query(None),
     db: Session = Depends(get_db),
 ):
     return crud.get_helpers(db=db, skip=skip, limit=limit, is_active=is_active)

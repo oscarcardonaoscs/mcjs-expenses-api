@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app import crud, schemas
 
+from typing import Optional
 
 router = APIRouter(
     prefix="/helper-payroll-periods",
@@ -17,8 +18,8 @@ router = APIRouter(
 def get_helper_payroll_periods(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    helper_id: int | None = Query(None),
-    status_filter: str | None = Query(None, alias="status"),
+    helper_id: Optional[int] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
     db: Session = Depends(get_db),
 ):
     return crud.get_helper_payroll_periods(

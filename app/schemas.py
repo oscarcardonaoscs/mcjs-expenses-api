@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, constr, condecimal, model_validator
 from datetime import date, datetime, time
 from typing import Optional, List, Dict
 from typing_extensions import Literal
+from typing import Optional
 
 DecimalMoney = condecimal(max_digits=10, decimal_places=3)
 DecimalQty = condecimal(max_digits=10, decimal_places=3)
@@ -498,8 +499,8 @@ class ClientCreate(ClientBase):
 
 
 class ClientUpdate(BaseModel):
-    name: str | None = None
-    is_active: bool | None = None
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class ClientResponse(ClientBase):

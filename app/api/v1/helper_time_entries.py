@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app import crud, schemas
 
+from typing import Optional
+
 router = APIRouter(prefix="/helper-time-entries", tags=["Helper Time Entries"])
 
 
@@ -14,9 +16,9 @@ router = APIRouter(prefix="/helper-time-entries", tags=["Helper Time Entries"])
 def get_helper_time_entries(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    helper_id: int | None = Query(None),
-    date_from: date | None = Query(None),
-    date_to: date | None = Query(None),
+    helper_id: Optional[int] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     unassigned_only: bool = Query(False),
     db: Session = Depends(get_db),
 ):
