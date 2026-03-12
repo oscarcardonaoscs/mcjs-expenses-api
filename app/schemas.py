@@ -329,6 +329,7 @@ class HelperTimeEntryResponse(BaseModel):
     helper_payroll_period_id: Optional[int] = None
     work_date: date
     client_id: int
+    client_name: Optional[str] = None
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     work_minutes: int

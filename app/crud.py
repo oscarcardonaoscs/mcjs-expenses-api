@@ -669,7 +669,16 @@ def get_helper_time_entries(
     date_to: Optional[date] = None,
     unassigned_only: bool = False,
 ):
-    q = db.query(models.HelperTimeEntry)
+    q = (
+        db.query(
+            models.HelperTimeEntry,
+            models.Client.name.label("client_name"),
+        )
+        .outerjoin(
+            models.Client,
+            models.HelperTimeEntry.client_id == models.Client.id,
+        )
+    )
 
     if helper_id is not None:
         q = q.filter(models.HelperTimeEntry.helper_id == helper_id)
@@ -683,11 +692,39 @@ def get_helper_time_entries(
     if unassigned_only:
         q = q.filter(models.HelperTimeEntry.helper_payroll_period_id.is_(None))
 
-    return q.order_by(
-        models.HelperTimeEntry.work_date.desc(),
-        models.HelperTimeEntry.start_time.desc(),
-        models.HelperTimeEntry.id.desc()
-    ).offset(skip).limit(limit).all()
+    rows = (
+        q.order_by(
+            models.HelperTimeEntry.work_date.desc(),
+            models.HelperTimeEntry.start_time.desc(),
+            models.HelperTimeEntry.id.desc()
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    results = []
+
+    for entry, client_name in rows:
+        results.append(
+            schemas.HelperTimeEntryResponse(
+                id=entry.id,
+                helper_id=entry.helper_id,
+                helper_payroll_period_id=entry.helper_payroll_period_id,
+                work_date=entry.work_date,
+                client_id=entry.client_id,
+                client_name=client_name,
+                start_time=entry.start_time,
+                end_time=entry.end_time,
+                work_minutes=entry.work_minutes,
+                travel_minutes=entry.travel_minutes,
+                notes=entry.notes,
+                created_at=entry.created_at,
+                updated_at=entry.updated_at,
+            )
+        )
+
+    return results
 
 
 def get_helper_time_entry(db: Session, entry_id: int):
