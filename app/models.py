@@ -267,6 +267,12 @@ class HelperTimeEntry(Base):
     )
 
     @property
+    def client_name(self):
+        if not self.client:
+            return None
+        return self.client.name
+
+    @property
     def work_hours(self):
         hours = Decimal(str(self.work_minutes or 0)) / Decimal("60")
         return hours.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
