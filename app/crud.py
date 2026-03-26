@@ -892,6 +892,109 @@ def delete_helper_time_entry(db: Session, entry_id: int):
 
 
 # ---------- Helper Payroll Periods ----------
+def _get_expense_category_by_name(db: Session, name: str):
+    return (
+        db.query(models.Category)
+        .filter(func.lower(models.Category.name) == name.lower())
+        .first()
+    )
+
+
+def _get_expense_helper_payroll_link(db: Session, payroll_id: int):
+    return (
+        db.query(models.ExpenseHelperPayrollLink)
+        .filter(
+            models.ExpenseHelperPayrollLink.helper_payroll_period_id == payroll_id
+        )
+        .first()
+    )
+
+
+def _build_helper_payroll_expense_payload(payroll) -> schemas.ExpenseCreate:
+    helper_name_parts = [
+        (payroll.helper.first_name or "").strip(),
+        (payroll.helper.last_name or "").strip(
+        ) if payroll.helper.last_name else "",
+    ]
+    helper_name = " ".join(
+        [p for p in helper_name_parts if p]).strip() or "Helper"
+
+    description = "Worked {} to {}".format(
+        payroll.period_start.isoformat(),
+        payroll.period_end.isoformat(),
+    )
+
+    return schemas.ExpenseCreate(
+        date=payroll.pay_date,
+        total=payroll.total_amount,
+        notes=payroll.notes,
+        category_id=150001,  # Helpers
+        vendor_id=None,
+        description=description,
+        helper_name=helper_name,
+        task_project="Payroll",
+        quantity=Decimal("1.000"),
+        apply_tax=False,
+        subtotal=payroll.total_amount,
+        tax_amount=Decimal("0.00"),
+        unit="payroll",
+        unit_price=payroll.total_amount,
+        gallons_miles=None,
+        expense_type="Helpers",
+        payment_method="CASH",
+        payment_account_id=1,  # Default account
+        paid=True,
+        receipt_url=None,
+    )
+
+
+def _ensure_expense_for_helper_payroll(
+    db: Session,
+    payroll,
+):
+    existing_link = _get_expense_helper_payroll_link(db, payroll.id)
+    if existing_link:
+        return existing_link
+
+    category = _get_expense_category_by_name(db, "Helpers")
+    if not category:
+        raise ValueError("Category 'Helpers' not found")
+
+    expense_data = _build_helper_payroll_expense_payload(payroll)
+    expense_data.category_id = category.id
+
+    expense = create_expense(db, expense_data)
+
+    link = models.ExpenseHelperPayrollLink(
+        expense_id=expense.id,
+        helper_payroll_period_id=payroll.id,
+    )
+
+    db.add(link)
+    db.commit()
+    db.refresh(link)
+    return link
+
+
+def _delete_expense_for_helper_payroll(
+    db: Session,
+    payroll_id: int,
+):
+    link = _get_expense_helper_payroll_link(db, payroll_id)
+    if not link:
+        return False
+
+    expense = db.get(models.Expense, link.expense_id)
+
+    db.delete(link)
+
+    if expense:
+        db.delete(expense)
+
+    db.commit()
+    return True
+
+
 def get_helper_payroll_periods(
     db: Session,
     skip: int = 0,
@@ -975,6 +1078,8 @@ def update_helper_payroll_period(db: Session, payroll_id: int, payroll_in: schem
     if not obj:
         return None
 
+    old_status = obj.status
+
     if payroll_in.helper_id is not None:
         helper = get_helper(db, payroll_in.helper_id)
         if not helper:
@@ -1017,7 +1122,23 @@ def update_helper_payroll_period(db: Session, payroll_id: int, payroll_in: schem
     if payroll_in.notes is not None:
         obj.notes = payroll_in.notes.strip() if payroll_in.notes else None
 
+    new_status = obj.status
+
+    if old_status == "Paid" and new_status != "Paid":
+        obj.pay_date = None
+
     db.commit()
+    db.refresh(obj)
+
+    if old_status != "Paid" and new_status == "Paid":
+        if obj.pay_date is None:
+            raise ValueError(
+                "pay_date is required when marking payroll as Paid")
+        _ensure_expense_for_helper_payroll(db, obj)
+
+    elif old_status == "Paid" and new_status != "Paid":
+        _delete_expense_for_helper_payroll(db, obj.id)
+
     db.refresh(obj)
     return obj
 
@@ -1126,6 +1247,10 @@ def mark_helper_payroll_period_paid(
     payroll.status = "Paid"
 
     db.commit()
+    db.refresh(payroll)
+
+    _ensure_expense_for_helper_payroll(db, payroll)
+
     db.refresh(payroll)
     return payroll
 

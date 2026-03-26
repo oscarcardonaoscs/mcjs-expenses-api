@@ -328,3 +328,19 @@ class Client(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class ExpenseHelperPayrollLink(Base):
+    __tablename__ = "expense_helper_payroll_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    expense_id = Column(Integer, ForeignKey("expenses.id"),
+                        nullable=False, unique=True)
+    helper_payroll_period_id = Column(
+        Integer,
+        ForeignKey("helper_payroll_periods.id"),
+        nullable=False,
+        unique=True,
+    )
+    created_at = Column(DateTime, nullable=False,
+                        server_default=func.current_timestamp())
