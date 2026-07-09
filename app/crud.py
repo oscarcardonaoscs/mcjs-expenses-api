@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import select, extract, func
 from datetime import date, time
 import calendar
@@ -467,7 +467,20 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     return obj
 
 
+def delete_expense(db: Session, expense_id: int):
+    obj = db.get(models.Expense, expense_id)
+
+    if not obj:
+        return False
+
+    db.delete(obj)
+    db.commit()
+
+    return True
+
 # ---------- Payment Accounts ----------
+
+
 def create_payment_account(db: Session, data: schemas.PaymentAccountIn):
     obj = models.PaymentAccount(
         name=data.name.strip(),
@@ -681,22 +694,30 @@ def get_helper_time_entries(
     )
 
     if helper_id is not None:
-        q = q.filter(models.HelperTimeEntry.helper_id == helper_id)
+        q = q.filter(
+            models.HelperTimeEntry.helper_id == helper_id
+        )
 
     if date_from is not None:
-        q = q.filter(models.HelperTimeEntry.work_date >= date_from)
+        q = q.filter(
+            models.HelperTimeEntry.work_date >= date_from
+        )
 
     if date_to is not None:
-        q = q.filter(models.HelperTimeEntry.work_date <= date_to)
+        q = q.filter(
+            models.HelperTimeEntry.work_date <= date_to
+        )
 
     if unassigned_only:
-        q = q.filter(models.HelperTimeEntry.helper_payroll_period_id.is_(None))
+        q = q.filter(
+            models.HelperTimeEntry.helper_payroll_period_id.is_(None)
+        )
 
     rows = (
         q.order_by(
             models.HelperTimeEntry.work_date.desc(),
             models.HelperTimeEntry.start_time.desc(),
-            models.HelperTimeEntry.id.desc()
+            models.HelperTimeEntry.id.desc(),
         )
         .offset(skip)
         .limit(limit)
@@ -710,6 +731,10 @@ def get_helper_time_entries(
             schemas.HelperTimeEntryResponse(
                 id=entry.id,
                 helper_id=entry.helper_id,
+
+                # Relación con el Work Event
+                work_event_id=entry.work_event_id,
+
                 helper_payroll_period_id=entry.helper_payroll_period_id,
                 work_date=entry.work_date,
                 client_id=entry.client_id,
@@ -731,54 +756,108 @@ def get_helper_time_entry(db: Session, entry_id: int):
     return db.get(models.HelperTimeEntry, entry_id)
 
 
-def create_helper_time_entry(db: Session, entry_in: schemas.HelperTimeEntryCreate):
-    helper = get_helper(db, entry_in.helper_id)
-    if not helper:
-        raise ValueError("Helper not found")
+def create_helper_time_entry(
+    db: Session,
+    entry_in: schemas.HelperTimeEntryCreate,
+):
+    def calculate_work_minutes(start_time, end_time):
+        if start_time is None or end_time is None:
+            return 0
 
-    client = get_client(db, entry_in.client_id)
-    if not client:
-        raise ValueError("Client not found")
+        start_total_minutes = (
+            start_time.hour * 60
+            + start_time.minute
+        )
 
-    if entry_in.helper_payroll_period_id is not None:
-        payroll = get_helper_payroll_period(
-            db, entry_in.helper_payroll_period_id)
-        if not payroll:
-            raise ValueError("Helper payroll period not found")
+        end_total_minutes = (
+            end_time.hour * 60
+            + end_time.minute
+        )
 
-    work_minutes = entry_in.work_minutes
-    if work_minutes is None:
-        if entry_in.start_time is not None and entry_in.end_time is not None:
-            work_minutes = _minutes_between(
-                entry_in.start_time, entry_in.end_time
-            )
-        else:
-            work_minutes = 0
+        return max(
+            end_total_minutes - start_total_minutes,
+            0,
+        )
 
-    obj = models.HelperTimeEntry(
-        helper_id=entry_in.helper_id,
+    default_work_minutes = calculate_work_minutes(
+        entry_in.start_time,
+        entry_in.end_time,
+    )
+
+    work_event = models.HelperWorkEvent(
         client_id=entry_in.client_id,
-        helper_payroll_period_id=entry_in.helper_payroll_period_id,
         work_date=entry_in.work_date,
         start_time=entry_in.start_time,
         end_time=entry_in.end_time,
-        work_minutes=work_minutes,
-        travel_minutes=0,
-        notes=entry_in.notes.strip() if entry_in.notes else None,
+        notes=entry_in.notes,
     )
 
-    db.add(obj)
+    db.add(work_event)
+    db.flush()
+
+    created_entries = []
+    affected_helper_ids = set()
+
+    for helper_entry in entry_in.helpers:
+        helper = get_helper(
+            db,
+            helper_entry.helper_id,
+        )
+
+        if not helper:
+            raise ValueError(
+                f"Helper not found: {helper_entry.helper_id}"
+            )
+
+        work_minutes = helper_entry.work_minutes
+
+        if work_minutes is None:
+            work_minutes = default_work_minutes
+
+        db_entry = models.HelperTimeEntry(
+            helper_id=helper_entry.helper_id,
+            work_event_id=work_event.id,
+            helper_payroll_period_id=None,
+
+            # Compatibilidad temporal
+            client_id=entry_in.client_id,
+            work_date=entry_in.work_date,
+            start_time=entry_in.start_time,
+            end_time=entry_in.end_time,
+
+            work_minutes=work_minutes,
+
+            # Se inicializa en 0.
+            # El recálculo diario determina el valor real.
+            travel_minutes=0,
+
+            notes=helper_entry.notes,
+        )
+
+        db.add(db_entry)
+
+        created_entries.append(db_entry)
+        affected_helper_ids.add(
+            helper_entry.helper_id
+        )
+
     db.commit()
-    db.refresh(obj)
 
-    _recalculate_helper_time_entries_for_day(
-        db=db,
-        helper_id=obj.helper_id,
-        work_date=obj.work_date,
-    )
+    # Recalcular la jornada completa de cada helper.
+    for helper_id in affected_helper_ids:
+        _recalculate_helper_time_entries_for_day(
+            db=db,
+            helper_id=helper_id,
+            work_date=entry_in.work_date,
+        )
 
-    db.refresh(obj)
-    return obj
+    for db_entry in created_entries:
+        db.refresh(db_entry)
+
+    return {
+        "work_event_id": work_event.id,
+        "entries": created_entries,
+    }
 
 
 def update_helper_time_entry(db: Session, entry_id: int, entry_in: schemas.HelperTimeEntryUpdate):
@@ -1167,57 +1246,144 @@ def generate_helper_payroll_period(
     period_end: date,
     pay_date: Optional[date] = None,
 ):
+    # ---------------------------------------------------------
+    # 1. Validar que el helper exista
+    # ---------------------------------------------------------
     helper = get_helper(db, helper_id)
+
     if not helper:
         raise ValueError("Helper not found")
 
-    existing = db.query(models.HelperPayrollPeriod).filter(
-        models.HelperPayrollPeriod.helper_id == helper_id,
-        models.HelperPayrollPeriod.period_start == period_start,
-        models.HelperPayrollPeriod.period_end == period_end,
-    ).first()
+    # ---------------------------------------------------------
+    # 2. Validar que no exista ya un payroll para ese periodo
+    # ---------------------------------------------------------
+    existing = (
+        db.query(models.HelperPayrollPeriod)
+        .filter(
+            models.HelperPayrollPeriod.helper_id == helper_id,
+            models.HelperPayrollPeriod.period_start == period_start,
+            models.HelperPayrollPeriod.period_end == period_end,
+        )
+        .first()
+    )
 
     if existing:
         raise ValueError(
-            "A payroll period already exists for this helper and date range")
+            "A payroll period already exists for this helper and date range"
+        )
 
-    entries = db.query(models.HelperTimeEntry).filter(
-        models.HelperTimeEntry.helper_id == helper_id,
-        models.HelperTimeEntry.work_date >= period_start,
-        models.HelperTimeEntry.work_date <= period_end,
-        models.HelperTimeEntry.helper_payroll_period_id.is_(None),
-    ).order_by(
-        models.HelperTimeEntry.work_date.asc(),
-        models.HelperTimeEntry.start_time.asc(),
-        models.HelperTimeEntry.id.asc()
-    ).all()
+    # ---------------------------------------------------------
+    # 3. Buscar todos los días distintos con Time Entries
+    #    disponibles dentro del periodo.
+    # ---------------------------------------------------------
+    work_dates = (
+        db.query(models.HelperTimeEntry.work_date)
+        .filter(
+            models.HelperTimeEntry.helper_id == helper_id,
+            models.HelperTimeEntry.work_date >= period_start,
+            models.HelperTimeEntry.work_date <= period_end,
+            models.HelperTimeEntry.helper_payroll_period_id.is_(None),
+        )
+        .distinct()
+        .all()
+    )
+
+    # ---------------------------------------------------------
+    # 4. Recalcular work_minutes y travel_minutes
+    #    de cada día antes de generar el payroll.
+    # ---------------------------------------------------------
+    for (work_date,) in work_dates:
+        _recalculate_helper_time_entries_for_day(
+            db=db,
+            helper_id=helper_id,
+            work_date=work_date,
+        )
+
+    # ---------------------------------------------------------
+    # 5. Volver a consultar los entries después del recálculo.
+    #
+    # Esto es importante porque ahora travel_minutes ya contiene
+    # los valores corregidos.
+    # ---------------------------------------------------------
+    entries = (
+        db.query(models.HelperTimeEntry)
+        .filter(
+            models.HelperTimeEntry.helper_id == helper_id,
+            models.HelperTimeEntry.work_date >= period_start,
+            models.HelperTimeEntry.work_date <= period_end,
+            models.HelperTimeEntry.helper_payroll_period_id.is_(None),
+        )
+        .order_by(
+            models.HelperTimeEntry.work_date.asc(),
+            models.HelperTimeEntry.start_time.asc(),
+            models.HelperTimeEntry.id.asc(),
+        )
+        .all()
+    )
 
     if not entries:
         return None
 
-    total_work_minutes = sum(int(entry.work_minutes or 0) for entry in entries)
-    total_travel_minutes = sum(int(entry.travel_minutes or 0)
-                               for entry in entries)
+    # ---------------------------------------------------------
+    # 6. Calcular totales de minutos
+    # ---------------------------------------------------------
+    total_work_minutes = sum(
+        int(entry.work_minutes or 0)
+        for entry in entries
+    )
 
-    work_rate = _money(Decimal(str(helper.default_work_rate)))
-    travel_rate = _money(Decimal(str(helper.default_travel_rate)))
+    total_travel_minutes = sum(
+        int(entry.travel_minutes or 0)
+        for entry in entries
+    )
 
-    work_amount = _amount_from_minutes(total_work_minutes, work_rate)
-    travel_amount = _amount_from_minutes(total_travel_minutes, travel_rate)
-    total_amount = _money(work_amount + travel_amount)
+    # ---------------------------------------------------------
+    # 7. Obtener rates actuales del helper
+    # ---------------------------------------------------------
+    work_rate = _money(
+        Decimal(str(helper.default_work_rate))
+    )
 
+    travel_rate = _money(
+        Decimal(str(helper.default_travel_rate))
+    )
+
+    # ---------------------------------------------------------
+    # 8. Calcular montos
+    # ---------------------------------------------------------
+    work_amount = _amount_from_minutes(
+        total_work_minutes,
+        work_rate,
+    )
+
+    travel_amount = _amount_from_minutes(
+        total_travel_minutes,
+        travel_rate,
+    )
+
+    total_amount = _money(
+        work_amount + travel_amount
+    )
+
+    # ---------------------------------------------------------
+    # 9. Crear el Payroll Period
+    # ---------------------------------------------------------
     payroll = models.HelperPayrollPeriod(
         helper_id=helper_id,
         period_start=period_start,
         period_end=period_end,
         pay_date=pay_date,
+
         work_rate=work_rate,
         travel_rate=travel_rate,
+
         total_work_minutes=total_work_minutes,
         total_travel_minutes=total_travel_minutes,
+
         work_amount=work_amount,
         travel_amount=travel_amount,
         total_amount=total_amount,
+
         status="Ready",
         notes=None,
     )
@@ -1225,12 +1391,30 @@ def generate_helper_payroll_period(
     db.add(payroll)
     db.flush()
 
+    # ---------------------------------------------------------
+    # 10. Asociar los Time Entries al Payroll recién creado
+    # ---------------------------------------------------------
     for entry in entries:
         entry.helper_payroll_period_id = payroll.id
 
+    # ---------------------------------------------------------
+    # 11. Guardar cambios
+    # ---------------------------------------------------------
     db.commit()
-    _recalculate_helper_payroll_period_totals(db=db, payroll_id=payroll.id)
+
+    # ---------------------------------------------------------
+    # 12. Recalcular nuevamente los totales del payroll
+    #     desde los entries asociados.
+    #
+    # Esto mantiene una sola lógica de consolidación.
+    # ---------------------------------------------------------
+    _recalculate_helper_payroll_period_totals(
+        db=db,
+        payroll_id=payroll.id,
+    )
+
     db.refresh(payroll)
+
     return payroll
 
 
@@ -1255,10 +1439,17 @@ def mark_helper_payroll_period_paid(
     return payroll
 
 
-def get_clients(db: Session, skip: int = 0, limit: int = 100):
+def get_clients(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+):
     return (
         db.query(models.Client)
-        .order_by(models.Client.name)
+        .options(
+            selectinload(models.Client.locations)
+        )
+        .order_by(models.Client.name.asc())
         .offset(skip)
         .limit(limit)
         .all()
@@ -1278,23 +1469,31 @@ def get_client_by_name(db: Session, name: str):
 
 
 def create_client(db: Session, client: schemas.ClientCreate):
-    db_client = models.Client(**client.dict())
+    data = client.model_dump()
+
+    print("========== CREATE CLIENT DEBUG ==========")
+    print("models file:", models.__file__)
+    print("Client columns:", list(models.Client.__table__.columns.keys()))
+    print("Payload:", data)
+    print("=========================================")
+
+    db_client = models.Client(**data)
     db.add(db_client)
     db.commit()
     db.refresh(db_client)
     return db_client
 
 
-def update_client(db: Session, client_id: int, client: schemas.ClientUpdate):
+def update_client(db: Session, client_id: int, client_update: schemas.ClientUpdate):
     db_client = get_client(db, client_id)
 
     if not db_client:
         return None
 
-    update_data = client.dict(exclude_unset=True)
+    update_data = client_update.model_dump(exclude_unset=True)
 
-    for key, value in update_data.items():
-        setattr(db_client, key, value)
+    for field, value in update_data.items():
+        setattr(db_client, field, value)
 
     db.commit()
     db.refresh(db_client)
@@ -1312,3 +1511,565 @@ def delete_client(db: Session, client_id: int):
     db.commit()
 
     return db_client
+
+# ---------- Client Locations ----------
+
+
+def get_client_locations(
+    db: Session,
+    client_id: int,
+    include_inactive: bool = False,
+):
+    q = db.query(models.ClientLocation).filter(
+        models.ClientLocation.client_id == client_id
+    )
+
+    if not include_inactive:
+        q = q.filter(models.ClientLocation.is_active == True)
+
+    return (
+        q.order_by(
+            models.ClientLocation.is_primary.desc(),
+            models.ClientLocation.location_name.asc(),
+            models.ClientLocation.id.asc(),
+        )
+        .all()
+    )
+
+
+def get_client_location(db: Session, location_id: int):
+    return (
+        db.query(models.ClientLocation)
+        .filter(models.ClientLocation.id == location_id)
+        .first()
+    )
+
+
+def create_client_location(
+    db: Session,
+    client_id: int,
+    location_in: schemas.ClientLocationCreate,
+):
+    client = get_client(db, client_id)
+
+    if not client:
+        raise ValueError("Client not found")
+
+    existing_location = (
+        db.query(models.ClientLocation)
+        .filter(models.ClientLocation.client_id == client_id)
+        .first()
+    )
+
+    data = location_in.model_dump()
+
+    if data.get("access_notes"):
+        data["access_notes"] = data["access_notes"].strip() or None
+
+    if data.get("service_notes"):
+        data["service_notes"] = data["service_notes"].strip() or None
+
+    # If this is the first location for the client, make it primary.
+    if not existing_location:
+        data["is_primary"] = True
+
+    # If the new location is primary, remove primary from the others.
+    if data.get("is_primary") is True:
+        (
+            db.query(models.ClientLocation)
+            .filter(models.ClientLocation.client_id == client_id)
+            .update(
+                {models.ClientLocation.is_primary: False},
+                synchronize_session=False,
+            )
+        )
+
+    db_location = models.ClientLocation(
+        client_id=client_id,
+        **data,
+    )
+
+    db.add(db_location)
+    db.commit()
+    db.refresh(db_location)
+
+    return db_location
+
+
+def update_client_location(
+    db: Session,
+    location_id: int,
+    location_in: schemas.ClientLocationUpdate,
+):
+    db_location = get_client_location(db, location_id)
+
+    if not db_location:
+        return None
+
+    update_data = location_in.model_dump(exclude_unset=True)
+
+    if update_data.get("access_notes"):
+        update_data["access_notes"] = update_data["access_notes"].strip() or None
+
+    if update_data.get("service_notes"):
+        update_data["service_notes"] = update_data["service_notes"].strip() or None
+
+    # If this location is being marked as primary,
+    # remove primary from the other locations for the same client.
+    if update_data.get("is_primary") is True:
+        (
+            db.query(models.ClientLocation)
+            .filter(
+                models.ClientLocation.client_id == db_location.client_id,
+                models.ClientLocation.id != db_location.id,
+            )
+            .update(
+                {models.ClientLocation.is_primary: False},
+                synchronize_session=False,
+            )
+        )
+
+    for key, value in update_data.items():
+        setattr(db_location, key, value)
+
+    db.commit()
+    db.refresh(db_location)
+
+    return db_location
+
+
+def delete_client_location(db: Session, location_id: int):
+    db_location = get_client_location(db, location_id)
+
+    if not db_location:
+        return None
+
+    was_primary = bool(db_location.is_primary)
+    client_id = db_location.client_id
+
+    # Soft delete
+    db_location.is_active = False
+    db_location.is_primary = False
+
+    if was_primary:
+        replacement = (
+            db.query(models.ClientLocation)
+            .filter(
+                models.ClientLocation.client_id == client_id,
+                models.ClientLocation.id != location_id,
+                models.ClientLocation.is_active == True,
+            )
+            .order_by(models.ClientLocation.id.asc())
+            .first()
+        )
+
+        if replacement:
+            replacement.is_primary = True
+
+    db.commit()
+    db.refresh(db_location)
+
+    return db_location
+
+
+def create_helper_work_event(
+    db: Session,
+    work_event: schemas.HelperWorkEventCreate,
+):
+    # ---------------------------------------------------------
+    # 1. Validar helpers antes de crear cualquier registro
+    # ---------------------------------------------------------
+    helper_ids = {
+        helper_item.helper_id
+        for helper_item in work_event.helpers
+    }
+
+    for helper_id in helper_ids:
+        helper = get_helper(db, helper_id)
+
+        if not helper:
+            raise ValueError(
+                f"Helper not found: {helper_id}"
+            )
+
+    # ---------------------------------------------------------
+    # 2. Validar Location
+    #
+    # La location debe:
+    # - existir
+    # - pertenecer al cliente seleccionado
+    # - estar activa
+    # ---------------------------------------------------------
+    location = (
+        db.query(models.ClientLocation)
+        .filter(
+            models.ClientLocation.id == work_event.location_id,
+            models.ClientLocation.client_id == work_event.client_id,
+            models.ClientLocation.is_active.is_(True),
+        )
+        .first()
+    )
+
+    if not location:
+        raise ValueError(
+            "The selected location does not belong to the selected "
+            "client or is inactive."
+        )
+
+    # ---------------------------------------------------------
+    # 3. Calcular minutos de trabajo por defecto
+    #
+    # Si el evento todavía está planeado y no tiene horarios,
+    # dejamos 0 minutos.
+    # ---------------------------------------------------------
+    default_work_minutes = 0
+
+    if (
+        work_event.start_time is not None
+        and work_event.end_time is not None
+    ):
+        default_work_minutes = _minutes_between(
+            work_event.start_time,
+            work_event.end_time,
+        )
+
+    # ---------------------------------------------------------
+    # 4. Crear el Work Event
+    # ---------------------------------------------------------
+    db_event = models.HelperWorkEvent(
+        client_id=work_event.client_id,
+        location_id=work_event.location_id,
+        work_date=work_event.work_date,
+        start_time=work_event.start_time,
+        end_time=work_event.end_time,
+        notes=work_event.notes,
+    )
+
+    db.add(db_event)
+    db.flush()
+
+    created_entries = []
+
+    # ---------------------------------------------------------
+    # 5. Crear un HelperTimeEntry por cada helper
+    # ---------------------------------------------------------
+    for helper_item in work_event.helpers:
+        work_minutes = helper_item.work_minutes
+
+        if work_minutes is None:
+            work_minutes = default_work_minutes
+
+        db_time_entry = models.HelperTimeEntry(
+            helper_id=helper_item.helper_id,
+            work_event_id=db_event.id,
+
+            # Campos duplicados temporalmente para mantener
+            # compatibilidad con los flujos y listados actuales.
+            client_id=work_event.client_id,
+            work_date=work_event.work_date,
+            start_time=work_event.start_time,
+            end_time=work_event.end_time,
+
+            helper_payroll_period_id=None,
+
+            work_minutes=work_minutes,
+
+            # El valor correcto será calculado después de guardar
+            # todos los eventos del día.
+            travel_minutes=0,
+
+            notes=helper_item.notes,
+        )
+
+        db.add(db_time_entry)
+        created_entries.append(db_time_entry)
+
+    # ---------------------------------------------------------
+    # 6. Guardar evento y participaciones
+    # ---------------------------------------------------------
+    db.commit()
+    db.refresh(db_event)
+
+    for entry in created_entries:
+        db.refresh(entry)
+
+    # ---------------------------------------------------------
+    # 7. Recalcular Work Time y Travel Time del día completo
+    #    para cada helper afectado.
+    # ---------------------------------------------------------
+    affected_payroll_ids = set()
+
+    for helper_id in helper_ids:
+        recalculated_entries = (
+            _recalculate_helper_time_entries_for_day(
+                db=db,
+                helper_id=helper_id,
+                work_date=work_event.work_date,
+            )
+        )
+
+        # Un nuevo evento intermedio puede cambiar el travel time
+        # de un entry anterior que ya pertenece a un payroll.
+        for entry in recalculated_entries:
+            if entry.helper_payroll_period_id is not None:
+                affected_payroll_ids.add(
+                    entry.helper_payroll_period_id
+                )
+
+    # ---------------------------------------------------------
+    # 8. Actualizar payrolls que hayan sido afectados
+    # ---------------------------------------------------------
+    for payroll_id in affected_payroll_ids:
+        _recalculate_helper_payroll_period_totals(
+            db=db,
+            payroll_id=payroll_id,
+        )
+
+    # ---------------------------------------------------------
+    # 9. Refrescar antes de responder
+    # ---------------------------------------------------------
+    db.refresh(db_event)
+
+    for entry in created_entries:
+        db.refresh(entry)
+
+    return db_event
+
+
+def get_helper_work_event(
+    db: Session,
+    work_event_id: int,
+):
+    return (
+        db.query(models.HelperWorkEvent)
+        .options(
+            joinedload(models.HelperWorkEvent.time_entries)
+        )
+        .filter(
+            models.HelperWorkEvent.id == work_event_id
+        )
+        .first()
+    )
+
+
+def update_helper_work_event(
+    db: Session,
+    work_event_id: int,
+    work_event: schemas.HelperWorkEventCreate,
+):
+    db_event = get_helper_work_event(
+        db=db,
+        work_event_id=work_event_id,
+    )
+
+    if not db_event:
+        return None
+
+    # ---------------------------------------------------------
+    # 1. Validar Location
+    # ---------------------------------------------------------
+    location = (
+        db.query(models.ClientLocation)
+        .filter(
+            models.ClientLocation.id == work_event.location_id,
+            models.ClientLocation.client_id == work_event.client_id,
+            models.ClientLocation.is_active.is_(True),
+        )
+        .first()
+    )
+
+    if not location:
+        raise ValueError(
+            "The selected location does not belong to the selected "
+            "client or is inactive."
+        )
+
+    # ---------------------------------------------------------
+    # 2. Validar Helpers
+    # ---------------------------------------------------------
+    helper_ids = {
+        helper_item.helper_id
+        for helper_item in work_event.helpers
+    }
+
+    for helper_id in helper_ids:
+        helper = get_helper(db, helper_id)
+
+        if not helper:
+            raise ValueError(
+                f"Helper not found: {helper_id}"
+            )
+
+    # ---------------------------------------------------------
+    # 3. Guardar valores anteriores para recalcular
+    # ---------------------------------------------------------
+    old_work_date = db_event.work_date
+
+    old_helper_ids = {
+        entry.helper_id
+        for entry in db_event.time_entries
+    }
+
+    # ---------------------------------------------------------
+    # 4. Actualizar el Work Event
+    # ---------------------------------------------------------
+    db_event.client_id = work_event.client_id
+    db_event.location_id = work_event.location_id
+    db_event.work_date = work_event.work_date
+    db_event.start_time = work_event.start_time
+    db_event.end_time = work_event.end_time
+    db_event.notes = (
+        work_event.notes.strip()
+        if work_event.notes
+        else None
+    )
+
+    # ---------------------------------------------------------
+    # 5. Calcular work_minutes por defecto
+    # ---------------------------------------------------------
+    default_work_minutes = 0
+
+    if (
+        work_event.start_time is not None
+        and work_event.end_time is not None
+    ):
+        default_work_minutes = _minutes_between(
+            work_event.start_time,
+            work_event.end_time,
+        )
+
+    # ---------------------------------------------------------
+    # 6. Mapear entries existentes por helper
+    # ---------------------------------------------------------
+    existing_entries_by_helper = {
+        entry.helper_id: entry
+        for entry in db_event.time_entries
+    }
+
+    requested_helper_ids = set()
+
+    # ---------------------------------------------------------
+    # 7. Actualizar existentes o crear nuevos
+    # ---------------------------------------------------------
+    for helper_item in work_event.helpers:
+        helper_id = helper_item.helper_id
+
+        requested_helper_ids.add(helper_id)
+
+        work_minutes = helper_item.work_minutes
+
+        if work_minutes is None:
+            work_minutes = default_work_minutes
+
+        existing_entry = existing_entries_by_helper.get(
+            helper_id
+        )
+
+        if existing_entry:
+            existing_entry.client_id = work_event.client_id
+            existing_entry.work_date = work_event.work_date
+            existing_entry.start_time = work_event.start_time
+            existing_entry.end_time = work_event.end_time
+            existing_entry.work_minutes = work_minutes
+            existing_entry.notes = (
+                helper_item.notes.strip()
+                if helper_item.notes
+                else None
+            )
+
+        else:
+            new_entry = models.HelperTimeEntry(
+                helper_id=helper_id,
+                work_event_id=db_event.id,
+                helper_payroll_period_id=None,
+
+                client_id=work_event.client_id,
+                work_date=work_event.work_date,
+                start_time=work_event.start_time,
+                end_time=work_event.end_time,
+
+                work_minutes=work_minutes,
+                travel_minutes=0,
+
+                notes=(
+                    helper_item.notes.strip()
+                    if helper_item.notes
+                    else None
+                ),
+            )
+
+            db.add(new_entry)
+
+    # ---------------------------------------------------------
+    # 8. Eliminar Helpers removidos del evento
+    # ---------------------------------------------------------
+    entries_to_remove = [
+        entry
+        for entry in db_event.time_entries
+        if entry.helper_id not in requested_helper_ids
+    ]
+
+    for entry in entries_to_remove:
+        if entry.helper_payroll_period_id is not None:
+            raise ValueError(
+                f"Helper {entry.helper_id} cannot be removed because "
+                "the time entry is already assigned to a payroll period."
+            )
+
+        db.delete(entry)
+
+    # ---------------------------------------------------------
+    # 9. Guardar
+    # ---------------------------------------------------------
+    db.commit()
+    db.refresh(db_event)
+
+    # ---------------------------------------------------------
+    # 10. Recalcular días/helpers afectados
+    # ---------------------------------------------------------
+    affected_helper_ids = (
+        old_helper_ids | requested_helper_ids
+    )
+
+    affected_payroll_ids = set()
+
+    for helper_id in affected_helper_ids:
+        # Día anterior
+        old_entries = _recalculate_helper_time_entries_for_day(
+            db=db,
+            helper_id=helper_id,
+            work_date=old_work_date,
+        )
+
+        for entry in old_entries:
+            if entry.helper_payroll_period_id is not None:
+                affected_payroll_ids.add(
+                    entry.helper_payroll_period_id
+                )
+
+        # Día nuevo, sólo si cambió la fecha
+        if work_event.work_date != old_work_date:
+            new_entries = _recalculate_helper_time_entries_for_day(
+                db=db,
+                helper_id=helper_id,
+                work_date=work_event.work_date,
+            )
+
+            for entry in new_entries:
+                if entry.helper_payroll_period_id is not None:
+                    affected_payroll_ids.add(
+                        entry.helper_payroll_period_id
+                    )
+
+    # ---------------------------------------------------------
+    # 11. Recalcular Payrolls afectados
+    # ---------------------------------------------------------
+    for payroll_id in affected_payroll_ids:
+        _recalculate_helper_payroll_period_totals(
+            db=db,
+            payroll_id=payroll_id,
+        )
+
+    db.refresh(db_event)
+
+    return db_event

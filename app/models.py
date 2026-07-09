@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, DECIMAL, Date, Time, ForeignKey,
-    DateTime, Enum, Boolean, Text, Index, UniqueConstraint
+    DateTime, Enum, Boolean, Numeric, Text, Index, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -235,6 +235,14 @@ class HelperTimeEntry(Base):
         nullable=False,
         index=True
     )
+
+    work_event_id = Column(
+        Integer,
+        ForeignKey("helper_work_events.id"),
+        nullable=True,
+        index=True,
+    )
+
     helper_payroll_period_id = Column(
         Integer,
         ForeignKey("helper_payroll_periods.id",
@@ -245,9 +253,9 @@ class HelperTimeEntry(Base):
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
 
     work_date = Column(Date, nullable=False)
-    start_time = Column(Time, nullable=False)
-    end_time = Column(Time, nullable=False)
-    work_minutes = Column(Integer, nullable=False, default=0)
+    start_time = Column(Time, nullable=True)
+    end_time = Column(Time, nullable=True)
+    work_minutes = Column(Integer, nullable=True, default=0)
     travel_minutes = Column(Integer, nullable=False, default=0)
     notes = Column(Text, nullable=True)
 
@@ -264,6 +272,10 @@ class HelperTimeEntry(Base):
     payroll_period = relationship(
         "HelperPayrollPeriod",
         back_populates="time_entries"
+    )
+    work_event = relationship(
+        "HelperWorkEvent",
+        back_populates="time_entries",
     )
 
     @property
@@ -319,6 +331,9 @@ class Client(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(150), nullable=False)
+    phone = Column(String(30), nullable=True)
+    email = Column(String(150), nullable=True)
+    notes = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
     created_at = Column(DateTime, nullable=False, server_default=func.now())
@@ -328,6 +343,49 @@ class Client(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+    locations = relationship("ClientLocation", back_populates="client")
+
+    @property
+    def locations_count(self):
+        return len(self.locations)
+
+
+class ClientLocation(Base):
+    __tablename__ = "client_locations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey(
+        "clients.id"), nullable=False, index=True)
+
+    location_name = Column(String(100), nullable=False)
+
+    street_line1 = Column(String(150), nullable=True)
+    street_line2 = Column(String(150), nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(50), nullable=True)
+    postal_code = Column(String(20), nullable=True)
+    country = Column(String(50), nullable=False, default="USA")
+
+    square_feet = Column(Integer, nullable=True)
+    bedrooms = Column(Numeric(4, 1), nullable=True)
+    bathrooms = Column(Numeric(4, 1), nullable=True)
+
+    access_notes = Column(Text, nullable=True)
+    service_notes = Column(Text, nullable=True)
+
+    is_primary = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    client = relationship("Client", back_populates="locations")
 
 
 class ExpenseHelperPayrollLink(Base):
@@ -344,3 +402,45 @@ class ExpenseHelperPayrollLink(Base):
     )
     created_at = Column(DateTime, nullable=False,
                         server_default=func.current_timestamp())
+
+
+class HelperWorkEvent(Base):
+    __tablename__ = "helper_work_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    client_id = Column(Integer, ForeignKey(
+        "clients.id"), nullable=False, index=True)
+
+    location_id = Column(
+        Integer,
+        ForeignKey("client_locations.id"),
+        nullable=True,
+        index=True,
+    )
+
+    work_date = Column(Date, nullable=False, index=True)
+    start_time = Column(Time, nullable=True)
+    end_time = Column(Time, nullable=True)
+
+    notes = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    client = relationship("Client")
+
+    location = relationship(
+        "ClientLocation",
+        foreign_keys=[location_id],
+    )
+
+    time_entries = relationship(
+        "HelperTimeEntry",
+        back_populates="work_event",
+    )

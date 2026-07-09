@@ -1,11 +1,12 @@
-from pydantic import BaseModel, Field, constr, condecimal, model_validator
-from datetime import date, datetime, time
+from pydantic import BaseModel, EmailStr, Field, constr, condecimal, model_validator
+from datetime import date as Date, datetime as DateTime, time as Time
 from typing import Optional, List, Dict
 from typing_extensions import Literal
 from typing import Optional
 
 DecimalMoney = condecimal(max_digits=10, decimal_places=3)
 DecimalQty = condecimal(max_digits=10, decimal_places=3)
+DecimalRooms = condecimal(max_digits=4, decimal_places=1)
 
 PaymentMethod = Literal["CASH", "CARD", "ZELLE", "VENMO", "CASHAPP", "CHECK"]
 
@@ -92,8 +93,8 @@ class PaymentAccountOut(BaseModel):
     provider: Optional[str] = None
     last4: Optional[str] = None
     is_active: bool
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
 
     class Config:
         from_attributes = True
@@ -105,7 +106,7 @@ class ListPaymentAccountsResponse(BaseModel):
 
 # ---------- Expense ----------
 class ExpenseCreate(BaseModel):
-    date: date
+    date: Date
     category_id: Optional[int] = None
     vendor_id: Optional[int] = None
 
@@ -135,7 +136,7 @@ class ExpenseCreate(BaseModel):
 
 
 class ExpenseUpdate(BaseModel):
-    date: Optional[date] = None
+    date: Optional[Date] = None
     category_id: Optional[int] = None
     vendor_id: Optional[int] = None
 
@@ -165,7 +166,7 @@ class ExpenseUpdate(BaseModel):
 
 class ExpenseOut(BaseModel):
     id: int
-    date: date
+    date: Date
 
     category_id: Optional[int] = None
     vendor_id: Optional[int] = None
@@ -197,8 +198,8 @@ class ExpenseOut(BaseModel):
     vendor_name: Optional[str] = None
     payment_account_last4: Optional[str] = None
 
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
 
     class Config:
         from_attributes = True
@@ -253,8 +254,8 @@ class HelperUpdate(BaseModel):
 
 class HelperResponse(HelperBase):
     id: int
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
 
     class Config:
         from_attributes = True
@@ -267,11 +268,16 @@ class HelpersListResponse(BaseModel):
 # ---------- Helper Time Entries ----------
 class HelperTimeEntryBase(BaseModel):
     helper_id: int
-    client_id: int
+    work_event_id: Optional[int] = None
     helper_payroll_period_id: Optional[int] = None
-    work_date: date
-    start_time: Optional[time] = None
-    end_time: Optional[time] = None
+
+    # Estos campos siguen aquí para respuestas/listados legacy o joins,
+    # pero el CREATE nuevo ya no los manda dentro de cada helper.
+    client_id: int
+    work_date: Date
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
+
     work_minutes: Optional[int] = Field(default=None, ge=0)
     travel_minutes: int = Field(default=0, ge=0)
     notes: Optional[str] = None
@@ -286,23 +292,65 @@ class HelperTimeEntryBase(BaseModel):
             raise ValueError(
                 "start_time is required when end_time is provided")
 
-        if self.start_time is not None and self.end_time is not None and self.end_time <= self.start_time:
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.end_time <= self.start_time
+        ):
             raise ValueError("end_time must be greater than start_time")
 
         return self
 
 
-class HelperTimeEntryCreate(HelperTimeEntryBase):
-    pass
+class HelperTimeEntryHelperCreate(BaseModel):
+    helper_id: int
+    work_minutes: Optional[int] = Field(default=None, ge=0)
+    travel_minutes: int = Field(default=0, ge=0)
+    notes: Optional[str] = None
+
+
+class HelperTimeEntryCreate(BaseModel):
+    client_id: int
+    work_date: Date
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
+    notes: Optional[str] = None
+    helpers: List[HelperTimeEntryHelperCreate] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_times(self):
+        if self.start_time is not None and self.end_time is None:
+            raise ValueError(
+                "end_time is required when start_time is provided")
+
+        if self.end_time is not None and self.start_time is None:
+            raise ValueError(
+                "start_time is required when end_time is provided")
+
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.end_time <= self.start_time
+        ):
+            raise ValueError("end_time must be greater than start_time")
+
+        helper_ids = [helper.helper_id for helper in self.helpers]
+
+        if len(helper_ids) != len(set(helper_ids)):
+            raise ValueError(
+                "helpers cannot contain duplicated helper_id values")
+
+        return self
 
 
 class HelperTimeEntryUpdate(BaseModel):
     helper_id: Optional[int] = None
+    work_event_id: Optional[int] = None
     helper_payroll_period_id: Optional[int] = None
-    work_date: Optional[date] = None
+    work_date: Optional[Date] = None
     client_id: Optional[int] = None
-    start_time: Optional[time] = None
-    end_time: Optional[time] = None
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
     work_minutes: Optional[int] = Field(default=None, ge=0)
     travel_minutes: Optional[int] = Field(default=None, ge=0)
     notes: Optional[str] = None
@@ -317,7 +365,11 @@ class HelperTimeEntryUpdate(BaseModel):
             raise ValueError(
                 "start_time is required when end_time is provided")
 
-        if self.start_time is not None and self.end_time is not None and self.end_time <= self.start_time:
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.end_time <= self.start_time
+        ):
             raise ValueError("end_time must be greater than start_time")
 
         return self
@@ -326,31 +378,38 @@ class HelperTimeEntryUpdate(BaseModel):
 class HelperTimeEntryResponse(BaseModel):
     id: int
     helper_id: int
+    work_event_id: Optional[int] = None
     helper_payroll_period_id: Optional[int] = None
-    work_date: date
+    work_date: Date
     client_id: int
     client_name: Optional[str] = None
-    start_time: Optional[time] = None
-    end_time: Optional[time] = None
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
     work_minutes: int
     travel_minutes: int
     notes: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
 
     class Config:
         from_attributes = True
 
 
+class HelperTimeEntryCreateResponse(BaseModel):
+    work_event_id: int
+    entries: List[HelperTimeEntryResponse]
+
+
 class HelperTimeEntryPayrollDetailResponse(BaseModel):
     id: int
     helper_id: int
+    work_event_id: Optional[int] = None
     helper_payroll_period_id: Optional[int] = None
-    work_date: date
+    work_date: Date
     client_name: str
     description: Optional[str] = None
-    start_time: Optional[time] = None
-    end_time: Optional[time] = None
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
     work_minutes: int
     travel_minutes: int
     work_hours: DecimalMoney
@@ -359,8 +418,8 @@ class HelperTimeEntryPayrollDetailResponse(BaseModel):
     travel_rate: DecimalMoney
     line_total: DecimalMoney
     notes: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
 
     class Config:
         from_attributes = True
@@ -373,9 +432,9 @@ class HelperTimeEntriesListResponse(BaseModel):
 # ---------- Helper Payroll Periods ----------
 class HelperPayrollPeriodBase(BaseModel):
     helper_id: int
-    period_start: date
-    period_end: date
-    pay_date: Optional[date] = None
+    period_start: Date
+    period_end: Date
+    pay_date: Optional[Date] = None
     work_rate: DecimalMoney
     travel_rate: DecimalMoney
     total_work_minutes: int = Field(default=0, ge=0)
@@ -400,9 +459,9 @@ class HelperPayrollPeriodCreate(HelperPayrollPeriodBase):
 
 class HelperPayrollPeriodUpdate(BaseModel):
     helper_id: Optional[int] = None
-    period_start: Optional[date] = None
-    period_end: Optional[date] = None
-    pay_date: Optional[date] = None
+    period_start: Optional[Date] = None
+    period_end: Optional[Date] = None
+    pay_date: Optional[Date] = None
     work_rate: Optional[DecimalMoney] = None
     travel_rate: Optional[DecimalMoney] = None
     total_work_minutes: Optional[int] = Field(default=None, ge=0)
@@ -425,9 +484,9 @@ class HelperPayrollPeriodResponse(BaseModel):
     id: int
     helper_id: int
     helper_name: Optional[str] = None
-    period_start: date
-    period_end: date
-    pay_date: Optional[date] = None
+    period_start: Date
+    period_end: Date
+    pay_date: Optional[Date] = None
     work_rate: DecimalMoney
     travel_rate: DecimalMoney
     total_work_minutes: int
@@ -437,8 +496,8 @@ class HelperPayrollPeriodResponse(BaseModel):
     total_amount: DecimalMoney
     status: HelperPayrollStatus
     notes: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
 
     class Config:
         from_attributes = True
@@ -448,9 +507,9 @@ class HelperPayrollPeriodDetailResponse(BaseModel):
     id: int
     helper_id: int
     helper_name: Optional[str] = None
-    period_start: date
-    period_end: date
-    pay_date: Optional[date] = None
+    period_start: Date
+    period_end: Date
+    pay_date: Optional[Date] = None
     work_rate: DecimalMoney
     travel_rate: DecimalMoney
     total_work_minutes: int
@@ -460,8 +519,8 @@ class HelperPayrollPeriodDetailResponse(BaseModel):
     total_amount: DecimalMoney
     status: HelperPayrollStatus
     notes: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
     time_entries: List[HelperTimeEntryPayrollDetailResponse] = []
 
     class Config:
@@ -474,9 +533,9 @@ class HelperPayrollPeriodsListResponse(BaseModel):
 
 class HelperPayrollGenerateRequest(BaseModel):
     helper_id: int
-    period_start: date
-    period_end: date
-    pay_date: Optional[date] = None
+    period_start: Date
+    period_end: Date
+    pay_date: Optional[Date] = None
 
     @model_validator(mode="after")
     def validate_period_dates(self):
@@ -487,11 +546,15 @@ class HelperPayrollGenerateRequest(BaseModel):
 
 
 class HelperPayrollMarkPaidRequest(BaseModel):
-    pay_date: date
+    pay_date: Date
 
 
+# ---------- Clients ----------
 class ClientBase(BaseModel):
-    name: str
+    name: constr(strip_whitespace=True, min_length=1, max_length=150)
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    notes: Optional[str] = None
     is_active: bool = True
 
 
@@ -500,14 +563,181 @@ class ClientCreate(ClientBase):
 
 
 class ClientUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[constr(strip_whitespace=True,
+                          min_length=1, max_length=150)] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    notes: Optional[str] = None
     is_active: Optional[bool] = None
 
 
 class ClientResponse(ClientBase):
     id: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: DateTime
+    updated_at: DateTime
+    locations_count: int = 0
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+
+
+# ---------- Client Locations ----------
+class ClientLocationBase(BaseModel):
+    location_name: constr(strip_whitespace=True, min_length=1, max_length=100)
+
+    street_line1: Optional[constr(
+        strip_whitespace=True, max_length=150)] = None
+    street_line2: Optional[constr(
+        strip_whitespace=True, max_length=150)] = None
+    city: Optional[constr(strip_whitespace=True, max_length=100)] = None
+    state: Optional[constr(strip_whitespace=True, max_length=50)] = None
+    postal_code: Optional[constr(strip_whitespace=True, max_length=20)] = None
+    country: constr(strip_whitespace=True, max_length=50) = "USA"
+
+    square_feet: Optional[int] = Field(default=None, ge=0)
+    bedrooms: Optional[DecimalRooms] = None
+    bathrooms: Optional[DecimalRooms] = None
+
+    access_notes: Optional[str] = None
+    service_notes: Optional[str] = None
+
+    is_primary: bool = False
+    is_active: bool = True
+
+
+class ClientLocationCreate(ClientLocationBase):
+    pass
+
+
+class ClientLocationUpdate(BaseModel):
+    location_name: Optional[constr(
+        strip_whitespace=True, min_length=1, max_length=100)] = None
+
+    street_line1: Optional[constr(
+        strip_whitespace=True, max_length=150)] = None
+    street_line2: Optional[constr(
+        strip_whitespace=True, max_length=150)] = None
+    city: Optional[constr(strip_whitespace=True, max_length=100)] = None
+    state: Optional[constr(strip_whitespace=True, max_length=50)] = None
+    postal_code: Optional[constr(strip_whitespace=True, max_length=20)] = None
+    country: Optional[constr(strip_whitespace=True, max_length=50)] = None
+
+    square_feet: Optional[int] = Field(default=None, ge=0)
+    bedrooms: Optional[DecimalRooms] = None
+    bathrooms: Optional[DecimalRooms] = None
+
+    access_notes: Optional[str] = None
+    service_notes: Optional[str] = None
+
+    is_primary: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+class ClientLocationResponse(ClientLocationBase):
+    id: int
+    client_id: int
+    created_at: DateTime
+    updated_at: DateTime
+
+    class Config:
+        from_attributes = True
+
+
+class ClientWithLocationsResponse(ClientResponse):
+    locations: List[ClientLocationResponse] = Field(default_factory=list)
+
+
+class ClientLocationsListResponse(BaseModel):
+    items: List[ClientLocationResponse]
+
+# ---------- Helper Work Events ----------
+
+
+class HelperWorkEventHelperCreate(BaseModel):
+    helper_id: int
+    work_minutes: Optional[int] = Field(default=None, ge=0)
+    travel_minutes: int = Field(default=0, ge=0)
+    notes: Optional[str] = None
+
+
+class HelperWorkEventCreate(BaseModel):
+    client_id: int
+    location_id: int
+
+    work_date: Date
+
+    start_time: Time | None = None
+    end_time: Time | None = None
+
+    notes: Optional[str] = None
+
+    helpers: List[HelperWorkEventHelperCreate]
+
+    @model_validator(mode="after")
+    def validate_work_event(self):
+        if not self.helpers:
+            raise ValueError("At least one helper is required")
+
+        helper_ids = [
+            helper.helper_id
+            for helper in self.helpers
+        ]
+
+        if len(helper_ids) != len(set(helper_ids)):
+            raise ValueError("Duplicate helpers are not allowed")
+
+        # Both times must be provided together.
+        if (self.start_time is None) != (self.end_time is None):
+            raise ValueError(
+                "Start time and end time must both be provided or both be empty"
+            )
+
+        # Compare only when both times exist.
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.end_time <= self.start_time
+        ):
+            raise ValueError(
+                "End time must be after start time"
+            )
+
+        return self
+
+
+class HelperWorkEventHelperResponse(BaseModel):
+    id: int
+    helper_id: int
+    work_minutes: Optional[int] = None
+    travel_minutes: int
+    notes: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class HelperWorkEventResponse(BaseModel):
+    id: int
+
+    client_id: int
+
+    # Historical events may not have a location.
+    location_id: int | None = None
+
+    work_date: Date
+
+    # Planned events may not have times yet.
+    start_time: Time | None = None
+    end_time: Time | None = None
+
+    notes: Optional[str] = None
+
+    created_at: DateTime
+    updated_at: DateTime
+
+    time_entries: List[HelperWorkEventHelperResponse] = Field(
+        default_factory=list
+    )
+
+    class Config:
+        from_attributes = True

@@ -68,3 +68,85 @@ def delete_client(client_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Client not found")
 
     return None
+
+# ---------- Client Locations ----------
+
+
+@router.get(
+    "/{client_id}/locations",
+    response_model=schemas.ClientLocationsListResponse,
+)
+def get_client_locations(
+    client_id: int,
+    db: Session = Depends(get_db),
+):
+    client = crud.get_client(db, client_id)
+
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    locations = crud.get_client_locations(db=db, client_id=client_id)
+
+    return {"items": locations}
+
+
+@router.post(
+    "/{client_id}/locations",
+    response_model=schemas.ClientLocationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_client_location(
+    client_id: int,
+    location: schemas.ClientLocationCreate,
+    db: Session = Depends(get_db),
+):
+    try:
+        return crud.create_client_location(
+            db=db,
+            client_id=client_id,
+            location_in=location,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.put(
+    "/locations/{location_id}",
+    response_model=schemas.ClientLocationResponse,
+)
+def update_client_location(
+    location_id: int,
+    location: schemas.ClientLocationUpdate,
+    db: Session = Depends(get_db),
+):
+    updated = crud.update_client_location(
+        db=db,
+        location_id=location_id,
+        location_in=location,
+    )
+
+    if not updated:
+        raise HTTPException(
+            status_code=404, detail="Client location not found")
+
+    return updated
+
+
+@router.delete(
+    "/locations/{location_id}",
+    response_model=schemas.ClientLocationResponse,
+)
+def delete_client_location(
+    location_id: int,
+    db: Session = Depends(get_db),
+):
+    deleted = crud.delete_client_location(
+        db=db,
+        location_id=location_id,
+    )
+
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail="Client location not found")
+
+    return deleted

@@ -44,17 +44,23 @@ def get_helper_time_entry(entry_id: int, db: Session = Depends(get_db)):
     return entry
 
 
-@router.post("/", response_model=schemas.HelperTimeEntryResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=schemas.HelperTimeEntryCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_helper_time_entry(
     entry_in: schemas.HelperTimeEntryCreate,
     db: Session = Depends(get_db),
 ):
-    helper = crud.get_helper(db=db, helper_id=entry_in.helper_id)
-    if not helper:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Helper not found",
-        )
+    for helper_entry in entry_in.helpers:
+        helper = crud.get_helper(db=db, helper_id=helper_entry.helper_id)
+
+        if not helper:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Helper not found: {helper_entry.helper_id}",
+            )
 
     try:
         return crud.create_helper_time_entry(db=db, entry_in=entry_in)
