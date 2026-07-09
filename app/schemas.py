@@ -666,8 +666,8 @@ class HelperWorkEventCreate(BaseModel):
 
     work_date: Date
 
-    start_time: Time | None = None
-    end_time: Time | None = None
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
 
     notes: Optional[str] = None
 
@@ -722,13 +722,13 @@ class HelperWorkEventResponse(BaseModel):
     client_id: int
 
     # Historical events may not have a location.
-    location_id: int | None = None
+    location_id: Optional[int] = None
 
     work_date: Date
 
     # Planned events may not have times yet.
-    start_time: Time | None = None
-    end_time: Time | None = None
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
 
     notes: Optional[str] = None
 
