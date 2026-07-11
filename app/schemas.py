@@ -44,6 +44,39 @@ class CategoriesListResponse(BaseModel):
     items: List[CategoryOut]
 
 
+# ---------- Expense Concepts ----------
+class ExpenseConceptBase(BaseModel):
+    category_id: int
+    name: constr(strip_whitespace=True, min_length=1, max_length=150)
+    is_active: bool = True
+
+
+class ExpenseConceptCreate(ExpenseConceptBase):
+    pass
+
+
+class ExpenseConceptUpdate(BaseModel):
+    category_id: Optional[int] = None
+    name: Optional[
+        constr(strip_whitespace=True, min_length=1, max_length=150)
+    ] = None
+    is_active: Optional[bool] = None
+
+
+class ExpenseConceptOut(ExpenseConceptBase):
+    id: int
+    category_name: Optional[str] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ExpenseConceptsListResponse(BaseModel):
+    items: List[ExpenseConceptOut]
+
+
 # ---------- Vendor ----------
 class VendorOut(BaseModel):
     id: int
@@ -108,6 +141,7 @@ class ListPaymentAccountsResponse(BaseModel):
 class ExpenseCreate(BaseModel):
     date: Date
     category_id: Optional[int] = None
+    expense_concept_id: Optional[int] = None
     vendor_id: Optional[int] = None
 
     description: Optional[str] = None
@@ -138,6 +172,7 @@ class ExpenseCreate(BaseModel):
 class ExpenseUpdate(BaseModel):
     date: Optional[Date] = None
     category_id: Optional[int] = None
+    expense_concept_id: Optional[int] = None
     vendor_id: Optional[int] = None
 
     description: Optional[str] = None
@@ -169,6 +204,7 @@ class ExpenseOut(BaseModel):
     date: Date
 
     category_id: Optional[int] = None
+    expense_concept_id: Optional[int] = None
     vendor_id: Optional[int] = None
 
     description: Optional[str] = None
@@ -195,6 +231,7 @@ class ExpenseOut(BaseModel):
     notes: Optional[str] = None
 
     category_name: Optional[str] = None
+    expense_concept_name: Optional[str] = None
     vendor_name: Optional[str] = None
     payment_account_last4: Optional[str] = None
 

@@ -21,6 +21,70 @@ class Category(Base):
     name = Column(String(100), unique=True, nullable=False)
 
     expenses = relationship("Expense", back_populates="category")
+    expense_concepts = relationship(
+        "ExpenseConcept",
+        back_populates="category",
+    )
+
+
+class ExpenseConcept(Base):
+    __tablename__ = "expense_concepts"
+
+    id = Column(Integer, primary_key=True)
+    category_id = Column(
+        Integer,
+        ForeignKey(
+            "categories.id",
+            ondelete="RESTRICT",
+            onupdate="CASCADE",
+        ),
+        nullable=False,
+    )
+    name = Column(String(150), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    category = relationship(
+        "Category",
+        back_populates="expense_concepts",
+    )
+    expenses = relationship(
+        "Expense",
+        back_populates="expense_concept",
+        passive_deletes=True,
+    )
+
+    @property
+    def category_name(self):
+        if not self.category:
+            return None
+        return self.category.name
+
+    __table_args__ = (
+        UniqueConstraint(
+            "category_id",
+            "name",
+            name="uq_expense_concepts_category_name",
+        ),
+        Index(
+            "idx_expense_concepts_category_id",
+            "category_id",
+        ),
+        Index(
+            "idx_expense_concepts_is_active",
+            "is_active",
+        ),
+    )
 
 
 class Vendor(Base):
@@ -66,6 +130,15 @@ class Expense(Base):
         Integer,
         ForeignKey("categories.id", ondelete="SET NULL", onupdate="CASCADE"),
         nullable=True
+    )
+    expense_concept_id = Column(
+        Integer,
+        ForeignKey(
+            "expense_concepts.id",
+            ondelete="SET NULL",
+            onupdate="CASCADE",
+        ),
+        nullable=True,
     )
     vendor_id = Column(
         Integer,
@@ -114,8 +187,19 @@ class Expense(Base):
     )
 
     category = relationship("Category", back_populates="expenses")
+    expense_concept = relationship(
+        "ExpenseConcept",
+        back_populates="expenses",
+    )
     vendor = relationship("Vendor", back_populates="expenses")
     payment_account = relationship("PaymentAccount", back_populates="expenses")
+
+    __table_args__ = (
+        Index(
+            "idx_expenses_expense_concept_id",
+            "expense_concept_id",
+        ),
+    )
 
 
 class Helper(Base):

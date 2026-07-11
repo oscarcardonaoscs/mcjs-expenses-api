@@ -167,6 +167,168 @@ def delete_category(db: Session, category_id: int):
     db.commit()
 
 
+# ---------- Expense Concepts ----------
+def _find_duplicate_expense_concept(
+    db: Session,
+    category_id: int,
+    name: str,
+    exclude_id: Optional[int] = None,
+):
+    q = (
+        db.query(models.ExpenseConcept)
+        .filter(
+            models.ExpenseConcept.category_id == category_id,
+            func.lower(models.ExpenseConcept.name) == name.lower(),
+        )
+    )
+
+    if exclude_id is not None:
+        q = q.filter(models.ExpenseConcept.id != exclude_id)
+
+    return q.first()
+
+
+def create_expense_concept(
+    db: Session,
+    data: schemas.ExpenseConceptCreate,
+):
+    category = get_category(db, data.category_id)
+
+    if not category:
+        raise ValueError("Category not found")
+
+    name = data.name.strip()
+
+    existing = _find_duplicate_expense_concept(
+        db=db,
+        category_id=data.category_id,
+        name=name,
+    )
+
+    if existing:
+        raise ValueError(
+            "An expense concept with this name already exists "
+            "for the selected category"
+        )
+
+    obj = models.ExpenseConcept(
+        category_id=data.category_id,
+        name=name,
+        is_active=bool(data.is_active),
+    )
+
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+
+    return get_expense_concept(db, obj.id)
+
+
+def list_expense_concepts(
+    db: Session,
+    category_id: Optional[int] = None,
+    is_active: Optional[bool] = True,
+):
+    q = (
+        db.query(models.ExpenseConcept)
+        .options(joinedload(models.ExpenseConcept.category))
+    )
+
+    if category_id is not None:
+        q = q.filter(models.ExpenseConcept.category_id == category_id)
+
+    if is_active is not None:
+        q = q.filter(models.ExpenseConcept.is_active == bool(is_active))
+
+    return (
+        q.order_by(
+            models.ExpenseConcept.name.asc(),
+            models.ExpenseConcept.id.asc(),
+        )
+        .all()
+    )
+
+
+def get_expense_concept(
+    db: Session,
+    expense_concept_id: int,
+):
+    return (
+        db.query(models.ExpenseConcept)
+        .options(joinedload(models.ExpenseConcept.category))
+        .filter(models.ExpenseConcept.id == expense_concept_id)
+        .first()
+    )
+
+
+def update_expense_concept(
+    db: Session,
+    expense_concept_id: int,
+    data: schemas.ExpenseConceptUpdate,
+):
+    obj = get_expense_concept(db, expense_concept_id)
+
+    if not obj:
+        return None
+
+    category_id = (
+        data.category_id
+        if data.category_id is not None
+        else obj.category_id
+    )
+    name = data.name.strip() if data.name is not None else obj.name
+
+    if data.category_id is not None:
+        category = get_category(db, data.category_id)
+        if not category:
+            raise ValueError("Category not found")
+
+    existing = _find_duplicate_expense_concept(
+        db=db,
+        category_id=category_id,
+        name=name,
+        exclude_id=obj.id,
+    )
+
+    if existing:
+        raise ValueError(
+            "An expense concept with this name already exists "
+            "for the selected category"
+        )
+
+    if data.category_id is not None:
+        obj.category_id = data.category_id
+
+    if data.name is not None:
+        obj.name = name
+
+    if data.is_active is not None:
+        obj.is_active = bool(data.is_active)
+
+    db.commit()
+    db.refresh(obj)
+
+    return get_expense_concept(db, obj.id)
+
+
+def delete_expense_concept(
+    db: Session,
+    expense_concept_id: int,
+):
+    obj = get_expense_concept(db, expense_concept_id)
+
+    if not obj:
+        return False
+
+    # Soft delete so historical expenses keep their concept relation.
+    obj.is_active = False
+
+    db.commit()
+    db.refresh(obj)
+
+    return True
+
+
 # Vendors
 def create_vendor(db: Session, data: schemas.VendorIn):
     obj = models.Vendor(name=data.name.strip())
@@ -205,6 +367,33 @@ def delete_vendor(db: Session, vendor_id: int):
 
 
 # ---------- Expenses ----------
+def _validate_expense_concept(
+    db: Session,
+    expense_concept_id: int,
+    category_id: Optional[int],
+    require_active: bool = True,
+):
+    concept = get_expense_concept(db, expense_concept_id)
+
+    if not concept:
+        raise ValueError("Expense concept not found")
+
+    if require_active and not concept.is_active:
+        raise ValueError("Expense concept is inactive")
+
+    if category_id is None:
+        raise ValueError(
+            "category_id is required when expense_concept_id is provided"
+        )
+
+    if concept.category_id != category_id:
+        raise ValueError(
+            "Expense concept does not belong to the selected category"
+        )
+
+    return concept
+
+
 def _compute_from_parts(unit_price, quantity, apply_tax_bool: bool):
     """
     Devuelve (subtotal, tax, total) usando Decimal y redondeo financiero.
@@ -221,6 +410,14 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
     logger.info("[create_expense] Received data: %s", data.model_dump())
 
     is_helpers = (data.expense_type or "").strip().lower() == "helpers"
+
+    if data.expense_concept_id is not None:
+        _validate_expense_concept(
+            db=db,
+            expense_concept_id=data.expense_concept_id,
+            category_id=data.category_id,
+            require_active=True,
+        )
 
     apply_tax_bool = False if is_helpers else (
         True if data.apply_tax is None else bool(data.apply_tax)
@@ -285,6 +482,7 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
     obj = models.Expense(
         date=data.date,
         category_id=data.category_id,
+        expense_concept_id=data.expense_concept_id,
         vendor_id=vendor_id,
 
         description=desc,
@@ -339,6 +537,7 @@ def list_expenses(
 ):
     E = models.Expense
     C = models.Category
+    EC = models.ExpenseConcept
     V = models.Vendor
     PA = models.PaymentAccount
 
@@ -347,6 +546,7 @@ def list_expenses(
             E.id,
             E.date,
             E.category_id,
+            E.expense_concept_id,
             E.vendor_id,
             E.description,
             E.helper_name,
@@ -368,11 +568,13 @@ def list_expenses(
             E.created_at,
             E.updated_at,
             C.name.label("category_name"),
+            EC.name.label("expense_concept_name"),
             V.name.label("vendor_name"),
             PA.last4.label("payment_account_last4"),
         )
         .select_from(E)
         .outerjoin(C, E.category_id == C.id)
+        .outerjoin(EC, E.expense_concept_id == EC.id)
         .outerjoin(V, E.vendor_id == V.id)
         .outerjoin(PA, E.payment_account_id == PA.id)
     )
@@ -397,10 +599,39 @@ def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
     if not obj:
         raise ValueError("Expense not found")
 
+    fields_set = data.model_fields_set
+
+    new_category_id = (
+        data.category_id
+        if "category_id" in fields_set
+        else obj.category_id
+    )
+    new_expense_concept_id = (
+        data.expense_concept_id
+        if "expense_concept_id" in fields_set
+        else obj.expense_concept_id
+    )
+
+    if new_expense_concept_id is not None and (
+        "expense_concept_id" in fields_set
+        or "category_id" in fields_set
+    ):
+        _validate_expense_concept(
+            db=db,
+            expense_concept_id=new_expense_concept_id,
+            category_id=new_category_id,
+            require_active="expense_concept_id" in fields_set,
+        )
+
     if data.date is not None:
         obj.date = data.date
-    if data.category_id is not None:
+
+    if "category_id" in fields_set:
         obj.category_id = data.category_id
+
+    if "expense_concept_id" in fields_set:
+        obj.expense_concept_id = data.expense_concept_id
+
     if data.vendor_id is not None:
         obj.vendor_id = data.vendor_id
 
