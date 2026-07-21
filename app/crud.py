@@ -1973,6 +1973,11 @@ def create_helper_work_event(
         work_date=work_event.work_date,
         start_time=work_event.start_time,
         end_time=work_event.end_time,
+        service_amount=(
+            _money(Decimal(str(work_event.service_amount)))
+            if work_event.service_amount is not None
+            else None
+        ),
         notes=work_event.notes,
     )
 
@@ -2149,6 +2154,11 @@ def update_helper_work_event(
     db_event.work_date = work_event.work_date
     db_event.start_time = work_event.start_time
     db_event.end_time = work_event.end_time
+    db_event.service_amount = (
+        _money(Decimal(str(work_event.service_amount)))
+        if work_event.service_amount is not None
+        else None
+    )
     db_event.notes = (
         work_event.notes.strip()
         if work_event.notes

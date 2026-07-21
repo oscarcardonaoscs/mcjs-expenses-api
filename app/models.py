@@ -507,6 +507,11 @@ class HelperWorkEvent(Base):
     start_time = Column(Time, nullable=True)
     end_time = Column(Time, nullable=True)
 
+    service_amount = Column(
+        Numeric(10, 2),
+        nullable=True,
+    )
+
     notes = Column(Text, nullable=True)
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)

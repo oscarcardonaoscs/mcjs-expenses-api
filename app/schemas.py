@@ -7,6 +7,11 @@ from typing import Optional
 DecimalMoney = condecimal(max_digits=10, decimal_places=3)
 DecimalQty = condecimal(max_digits=10, decimal_places=3)
 DecimalRooms = condecimal(max_digits=4, decimal_places=1)
+DecimalCurrency = condecimal(
+    max_digits=10,
+    decimal_places=2,
+    ge=0,
+)
 
 PaymentMethod = Literal["CASH", "CARD", "ZELLE", "VENMO", "CASHAPP", "CHECK"]
 
@@ -706,6 +711,8 @@ class HelperWorkEventCreate(BaseModel):
     start_time: Optional[Time] = None
     end_time: Optional[Time] = None
 
+    service_amount: Optional[DecimalCurrency] = None
+
     notes: Optional[str] = None
 
     helpers: List[HelperWorkEventHelperCreate]
@@ -766,6 +773,8 @@ class HelperWorkEventResponse(BaseModel):
     # Planned events may not have times yet.
     start_time: Optional[Time] = None
     end_time: Optional[Time] = None
+
+    service_amount: Optional[DecimalCurrency] = None
 
     notes: Optional[str] = None
 
