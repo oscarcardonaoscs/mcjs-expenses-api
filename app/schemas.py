@@ -2,7 +2,6 @@ from pydantic import BaseModel, EmailStr, Field, constr, condecimal, model_valid
 from datetime import date as Date, datetime as DateTime, time as Time
 from typing import Optional, List, Dict
 from typing_extensions import Literal
-from typing import Optional
 
 DecimalMoney = condecimal(max_digits=10, decimal_places=3)
 DecimalQty = condecimal(max_digits=10, decimal_places=3)
@@ -19,6 +18,36 @@ PaymentAccountType = Literal["CASH", "DEBIT",
                              "CREDIT", "BANK", "ZELLE", "CHECK", "OTHER"]
 
 HelperPayrollStatus = Literal["Open", "Ready", "Paid", "Cancelled"]
+
+ServiceType = Literal[
+    "Regular",
+    "Total",
+    "Deep",
+    "Move In",
+    "Move Out",
+    "Post Construction",
+    "Airbnb",
+]
+
+ServiceFrequency = Literal[
+    "Weekly",
+    "Bi-weekly",
+    "Monthly",
+    "One Time",
+]
+
+ClientPaymentMethod = Literal[
+    "Cash",
+    "Venmo",
+    "Check",
+    "Zelle",
+    "Cash App",
+]
+
+ClientPaymentStatus = Literal[
+    "Pending",
+    "Collected",
+]
 
 
 # ---------- Category ----------
@@ -712,20 +741,20 @@ class HelperWorkEventCreate(BaseModel):
     end_time: Optional[Time] = None
 
     service_amount: Optional[DecimalCurrency] = None
+    service_type: Optional[ServiceType] = None
+    service_frequency: Optional[ServiceFrequency] = None
+
+    payment_method: Optional[ClientPaymentMethod] = None
+    payment_status: ClientPaymentStatus = "Pending"
+    payment_received_date: Optional[Date] = None
 
     notes: Optional[str] = None
 
-    helpers: List[HelperWorkEventHelperCreate]
+    helpers: List[HelperWorkEventHelperCreate] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_work_event(self):
-        if not self.helpers:
-            raise ValueError("At least one helper is required")
-
-        helper_ids = [
-            helper.helper_id
-            for helper in self.helpers
-        ]
+        helper_ids = [helper.helper_id for helper in self.helpers]
 
         if len(helper_ids) != len(set(helper_ids)):
             raise ValueError("Duplicate helpers are not allowed")
@@ -736,15 +765,72 @@ class HelperWorkEventCreate(BaseModel):
                 "Start time and end time must both be provided or both be empty"
             )
 
-        # Compare only when both times exist.
         if (
             self.start_time is not None
             and self.end_time is not None
             and self.end_time <= self.start_time
         ):
-            raise ValueError(
-                "End time must be after start time"
-            )
+            raise ValueError("End time must be after start time")
+
+        # A paid event always receives a payment date.
+        if self.payment_status == "Paid" and self.payment_received_date is None:
+            self.payment_received_date = self.work_date
+
+        # Pending events must not carry a payment date.
+        if self.payment_status == "Pending":
+            self.payment_received_date = None
+
+        return self
+
+
+class HelperWorkEventUpdate(BaseModel):
+    client_id: Optional[int] = None
+    location_id: Optional[int] = None
+    work_date: Optional[Date] = None
+
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
+
+    service_amount: Optional[DecimalCurrency] = None
+    service_type: Optional[ServiceType] = None
+    service_frequency: Optional[ServiceFrequency] = None
+
+    payment_method: Optional[ClientPaymentMethod] = None
+    payment_status: Optional[ClientPaymentStatus] = None
+    payment_received_date: Optional[Date] = None
+
+    notes: Optional[str] = None
+    helpers: Optional[List[HelperWorkEventHelperCreate]] = None
+
+    @model_validator(mode="after")
+    def validate_work_event_update(self):
+        if self.helpers is not None:
+            if not self.helpers:
+                raise ValueError("At least one helper is required")
+
+            helper_ids = [helper.helper_id for helper in self.helpers]
+
+            if len(helper_ids) != len(set(helper_ids)):
+                raise ValueError("Duplicate helpers are not allowed")
+
+        # Validate time order only when both values are included.
+        # Final partial-update validation should also use the stored event in CRUD.
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.end_time <= self.start_time
+        ):
+            raise ValueError("End time must be after start time")
+
+        if self.payment_status == "Pending":
+            self.payment_received_date = None
+
+        if (
+            self.payment_status == "Paid"
+            and self.payment_received_date is None
+            and self.work_date is not None
+        ):
+            self.payment_received_date = self.work_date
 
         return self
 
@@ -762,7 +848,6 @@ class HelperWorkEventHelperResponse(BaseModel):
 
 class HelperWorkEventResponse(BaseModel):
     id: int
-
     client_id: int
 
     # Historical events may not have a location.
@@ -775,6 +860,12 @@ class HelperWorkEventResponse(BaseModel):
     end_time: Optional[Time] = None
 
     service_amount: Optional[DecimalCurrency] = None
+    service_type: Optional[ServiceType] = None
+    service_frequency: Optional[ServiceFrequency] = None
+
+    payment_method: Optional[ClientPaymentMethod] = None
+    payment_status: ClientPaymentStatus
+    payment_received_date: Optional[Date] = None
 
     notes: Optional[str] = None
 

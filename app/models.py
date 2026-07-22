@@ -522,6 +522,19 @@ class HelperWorkEvent(Base):
         nullable=False,
     )
 
+    service_type = Column(String(30), nullable=True)
+    service_frequency = Column(String(20), nullable=True)
+    payment_method = Column(String(20), nullable=True)
+
+    payment_status = Column(
+        String(20),
+        nullable=False,
+        default="Pending",
+        server_default="Pending",
+    )
+
+    payment_received_date = Column(Date, nullable=True)
+
     client = relationship("Client")
 
     location = relationship(

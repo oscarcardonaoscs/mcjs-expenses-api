@@ -1925,11 +1925,6 @@ def create_helper_work_event(
 
     # ---------------------------------------------------------
     # 2. Validar Location
-    #
-    # La location debe:
-    # - existir
-    # - pertenecer al cliente seleccionado
-    # - estar activa
     # ---------------------------------------------------------
     location = (
         db.query(models.ClientLocation)
@@ -1949,9 +1944,6 @@ def create_helper_work_event(
 
     # ---------------------------------------------------------
     # 3. Calcular minutos de trabajo por defecto
-    #
-    # Si el evento todavía está planeado y no tiene horarios,
-    # dejamos 0 minutos.
     # ---------------------------------------------------------
     default_work_minutes = 0
 
@@ -1965,7 +1957,18 @@ def create_helper_work_event(
         )
 
     # ---------------------------------------------------------
-    # 4. Crear el Work Event
+    # 4. Normalizar información de pago
+    # ---------------------------------------------------------
+    payment_status = work_event.payment_status or "Pending"
+    payment_received_date = work_event.payment_received_date
+
+    if payment_status == "Collected" and payment_received_date is None:
+        payment_received_date = work_event.work_date
+    elif payment_status == "Pending":
+        payment_received_date = None
+
+    # ---------------------------------------------------------
+    # 5. Crear el Work Event
     # ---------------------------------------------------------
     db_event = models.HelperWorkEvent(
         client_id=work_event.client_id,
@@ -1978,7 +1981,16 @@ def create_helper_work_event(
             if work_event.service_amount is not None
             else None
         ),
-        notes=work_event.notes,
+        service_type=work_event.service_type,
+        service_frequency=work_event.service_frequency,
+        payment_method=work_event.payment_method,
+        payment_status=payment_status,
+        payment_received_date=payment_received_date,
+        notes=(
+            work_event.notes.strip()
+            if work_event.notes
+            else None
+        ),
     )
 
     db.add(db_event)
@@ -1987,7 +1999,7 @@ def create_helper_work_event(
     created_entries = []
 
     # ---------------------------------------------------------
-    # 5. Crear un HelperTimeEntry por cada helper
+    # 6. Crear un HelperTimeEntry por cada helper
     # ---------------------------------------------------------
     for helper_item in work_event.helpers:
         work_minutes = helper_item.work_minutes
@@ -2007,21 +2019,24 @@ def create_helper_work_event(
             end_time=work_event.end_time,
 
             helper_payroll_period_id=None,
-
             work_minutes=work_minutes,
 
             # El valor correcto será calculado después de guardar
             # todos los eventos del día.
             travel_minutes=0,
 
-            notes=helper_item.notes,
+            notes=(
+                helper_item.notes.strip()
+                if helper_item.notes
+                else None
+            ),
         )
 
         db.add(db_time_entry)
         created_entries.append(db_time_entry)
 
     # ---------------------------------------------------------
-    # 6. Guardar evento y participaciones
+    # 7. Guardar evento y participaciones
     # ---------------------------------------------------------
     db.commit()
     db.refresh(db_event)
@@ -2030,8 +2045,7 @@ def create_helper_work_event(
         db.refresh(entry)
 
     # ---------------------------------------------------------
-    # 7. Recalcular Work Time y Travel Time del día completo
-    #    para cada helper afectado.
+    # 8. Recalcular Work Time y Travel Time del día completo
     # ---------------------------------------------------------
     affected_payroll_ids = set()
 
@@ -2044,8 +2058,6 @@ def create_helper_work_event(
             )
         )
 
-        # Un nuevo evento intermedio puede cambiar el travel time
-        # de un entry anterior que ya pertenece a un payroll.
         for entry in recalculated_entries:
             if entry.helper_payroll_period_id is not None:
                 affected_payroll_ids.add(
@@ -2053,7 +2065,7 @@ def create_helper_work_event(
                 )
 
     # ---------------------------------------------------------
-    # 8. Actualizar payrolls que hayan sido afectados
+    # 9. Actualizar payrolls afectados
     # ---------------------------------------------------------
     for payroll_id in affected_payroll_ids:
         _recalculate_helper_payroll_period_totals(
@@ -2062,7 +2074,7 @@ def create_helper_work_event(
         )
 
     # ---------------------------------------------------------
-    # 9. Refrescar antes de responder
+    # 10. Refrescar antes de responder
     # ---------------------------------------------------------
     db.refresh(db_event)
 
@@ -2091,7 +2103,7 @@ def get_helper_work_event(
 def update_helper_work_event(
     db: Session,
     work_event_id: int,
-    work_event: schemas.HelperWorkEventCreate,
+    work_event: schemas.HelperWorkEventUpdate,
 ):
     db_event = get_helper_work_event(
         db=db,
@@ -2101,166 +2113,255 @@ def update_helper_work_event(
     if not db_event:
         return None
 
+    fields_set = work_event.model_fields_set
+
     # ---------------------------------------------------------
-    # 1. Validar Location
+    # 1. Resolver valores efectivos del evento
     # ---------------------------------------------------------
-    location = (
-        db.query(models.ClientLocation)
-        .filter(
-            models.ClientLocation.id == work_event.location_id,
-            models.ClientLocation.client_id == work_event.client_id,
-            models.ClientLocation.is_active.is_(True),
-        )
-        .first()
+    new_client_id = (
+        work_event.client_id
+        if "client_id" in fields_set
+        else db_event.client_id
+    )
+    new_location_id = (
+        work_event.location_id
+        if "location_id" in fields_set
+        else db_event.location_id
+    )
+    new_work_date = (
+        work_event.work_date
+        if "work_date" in fields_set
+        else db_event.work_date
+    )
+    new_start_time = (
+        work_event.start_time
+        if "start_time" in fields_set
+        else db_event.start_time
+    )
+    new_end_time = (
+        work_event.end_time
+        if "end_time" in fields_set
+        else db_event.end_time
     )
 
-    if not location:
+    if (new_start_time is None) != (new_end_time is None):
         raise ValueError(
-            "The selected location does not belong to the selected "
-            "client or is inactive."
+            "Start time and end time must both be provided or both be empty"
         )
 
-    # ---------------------------------------------------------
-    # 2. Validar Helpers
-    # ---------------------------------------------------------
-    helper_ids = {
-        helper_item.helper_id
-        for helper_item in work_event.helpers
-    }
+    if (
+        new_start_time is not None
+        and new_end_time is not None
+        and new_end_time <= new_start_time
+    ):
+        raise ValueError("End time must be after start time")
 
-    for helper_id in helper_ids:
-        helper = get_helper(db, helper_id)
+    # ---------------------------------------------------------
+    # 2. Validar cliente y location efectivos
+    # ---------------------------------------------------------
+    client = get_client(db, new_client_id)
 
-        if not helper:
+    if not client:
+        raise ValueError("Client not found")
+
+    if new_location_id is not None:
+        location = (
+            db.query(models.ClientLocation)
+            .filter(
+                models.ClientLocation.id == new_location_id,
+                models.ClientLocation.client_id == new_client_id,
+                models.ClientLocation.is_active.is_(True),
+            )
+            .first()
+        )
+
+        if not location:
             raise ValueError(
-                f"Helper not found: {helper_id}"
+                "The selected location does not belong to the selected "
+                "client or is inactive."
             )
 
     # ---------------------------------------------------------
-    # 3. Guardar valores anteriores para recalcular
+    # 3. Validar helpers cuando se incluyan en el payload
+    # ---------------------------------------------------------
+    requested_helpers = work_event.helpers
+    requested_helper_ids = None
+
+    if "helpers" in fields_set:
+        if not requested_helpers:
+            raise ValueError("At least one helper is required")
+
+        requested_helper_ids = {
+            helper_item.helper_id
+            for helper_item in requested_helpers
+        }
+
+        for helper_id in requested_helper_ids:
+            helper = get_helper(db, helper_id)
+
+            if not helper:
+                raise ValueError(
+                    f"Helper not found: {helper_id}"
+                )
+
+    # ---------------------------------------------------------
+    # 4. Guardar valores anteriores para recalcular
     # ---------------------------------------------------------
     old_work_date = db_event.work_date
-
     old_helper_ids = {
         entry.helper_id
         for entry in db_event.time_entries
     }
 
     # ---------------------------------------------------------
-    # 4. Actualizar el Work Event
+    # 5. Actualizar campos del Work Event
     # ---------------------------------------------------------
-    db_event.client_id = work_event.client_id
-    db_event.location_id = work_event.location_id
-    db_event.work_date = work_event.work_date
-    db_event.start_time = work_event.start_time
-    db_event.end_time = work_event.end_time
-    db_event.service_amount = (
-        _money(Decimal(str(work_event.service_amount)))
-        if work_event.service_amount is not None
-        else None
-    )
-    db_event.notes = (
-        work_event.notes.strip()
-        if work_event.notes
-        else None
-    )
+    db_event.client_id = new_client_id
+    db_event.location_id = new_location_id
+    db_event.work_date = new_work_date
+    db_event.start_time = new_start_time
+    db_event.end_time = new_end_time
 
-    # ---------------------------------------------------------
-    # 5. Calcular work_minutes por defecto
-    # ---------------------------------------------------------
-    default_work_minutes = 0
+    if "service_amount" in fields_set:
+        db_event.service_amount = (
+            _money(Decimal(str(work_event.service_amount)))
+            if work_event.service_amount is not None
+            else None
+        )
 
-    if (
-        work_event.start_time is not None
-        and work_event.end_time is not None
-    ):
-        default_work_minutes = _minutes_between(
-            work_event.start_time,
-            work_event.end_time,
+    if "service_type" in fields_set:
+        db_event.service_type = work_event.service_type
+
+    if "service_frequency" in fields_set:
+        db_event.service_frequency = work_event.service_frequency
+
+    if "payment_method" in fields_set:
+        db_event.payment_method = work_event.payment_method
+
+    if "notes" in fields_set:
+        db_event.notes = (
+            work_event.notes.strip()
+            if work_event.notes
+            else None
         )
 
     # ---------------------------------------------------------
-    # 6. Mapear entries existentes por helper
+    # 6. Normalizar estado y fecha de pago
     # ---------------------------------------------------------
+    new_payment_status = (
+        work_event.payment_status
+        if "payment_status" in fields_set
+        else db_event.payment_status
+    ) or "Pending"
+
+    if "payment_received_date" in fields_set:
+        new_payment_received_date = work_event.payment_received_date
+    else:
+        new_payment_received_date = db_event.payment_received_date
+
+    if new_payment_status == "Collected":
+        if new_payment_received_date is None:
+            new_payment_received_date = new_work_date
+    elif new_payment_status == "Pending":
+        new_payment_received_date = None
+
+    db_event.payment_status = new_payment_status
+    db_event.payment_received_date = new_payment_received_date
+
+    # ---------------------------------------------------------
+    # 7. Calcular minutos por defecto
+    # ---------------------------------------------------------
+    default_work_minutes = 0
+
+    if new_start_time is not None and new_end_time is not None:
+        default_work_minutes = _minutes_between(
+            new_start_time,
+            new_end_time,
+        )
+
     existing_entries_by_helper = {
         entry.helper_id: entry
         for entry in db_event.time_entries
     }
 
-    requested_helper_ids = set()
-
     # ---------------------------------------------------------
-    # 7. Actualizar existentes o crear nuevos
+    # 8. Actualizar la lista de helpers, si fue enviada
     # ---------------------------------------------------------
-    for helper_item in work_event.helpers:
-        helper_id = helper_item.helper_id
+    if requested_helper_ids is not None:
+        for helper_item in requested_helpers:
+            helper_id = helper_item.helper_id
+            work_minutes = helper_item.work_minutes
 
-        requested_helper_ids.add(helper_id)
+            if work_minutes is None:
+                work_minutes = default_work_minutes
 
-        work_minutes = helper_item.work_minutes
+            existing_entry = existing_entries_by_helper.get(helper_id)
 
-        if work_minutes is None:
-            work_minutes = default_work_minutes
-
-        existing_entry = existing_entries_by_helper.get(
-            helper_id
-        )
-
-        if existing_entry:
-            existing_entry.client_id = work_event.client_id
-            existing_entry.work_date = work_event.work_date
-            existing_entry.start_time = work_event.start_time
-            existing_entry.end_time = work_event.end_time
-            existing_entry.work_minutes = work_minutes
-            existing_entry.notes = (
-                helper_item.notes.strip()
-                if helper_item.notes
-                else None
-            )
-
-        else:
-            new_entry = models.HelperTimeEntry(
-                helper_id=helper_id,
-                work_event_id=db_event.id,
-                helper_payroll_period_id=None,
-
-                client_id=work_event.client_id,
-                work_date=work_event.work_date,
-                start_time=work_event.start_time,
-                end_time=work_event.end_time,
-
-                work_minutes=work_minutes,
-                travel_minutes=0,
-
-                notes=(
+            if existing_entry:
+                existing_entry.client_id = new_client_id
+                existing_entry.work_date = new_work_date
+                existing_entry.start_time = new_start_time
+                existing_entry.end_time = new_end_time
+                existing_entry.work_minutes = work_minutes
+                existing_entry.notes = (
                     helper_item.notes.strip()
                     if helper_item.notes
                     else None
-                ),
-            )
+                )
+            else:
+                new_entry = models.HelperTimeEntry(
+                    helper_id=helper_id,
+                    work_event_id=db_event.id,
+                    helper_payroll_period_id=None,
+                    client_id=new_client_id,
+                    work_date=new_work_date,
+                    start_time=new_start_time,
+                    end_time=new_end_time,
+                    work_minutes=work_minutes,
+                    travel_minutes=0,
+                    notes=(
+                        helper_item.notes.strip()
+                        if helper_item.notes
+                        else None
+                    ),
+                )
+                db.add(new_entry)
 
-            db.add(new_entry)
+        entries_to_remove = [
+            entry
+            for entry in db_event.time_entries
+            if entry.helper_id not in requested_helper_ids
+        ]
+
+        for entry in entries_to_remove:
+            if entry.helper_payroll_period_id is not None:
+                raise ValueError(
+                    f"Helper {entry.helper_id} cannot be removed because "
+                    "the time entry is already assigned to a payroll period."
+                )
+
+            db.delete(entry)
+
+        final_helper_ids = requested_helper_ids
+
+    else:
+        # Mantener helpers actuales, pero sincronizar los campos duplicados.
+        for entry in db_event.time_entries:
+            entry.client_id = new_client_id
+            entry.work_date = new_work_date
+            entry.start_time = new_start_time
+            entry.end_time = new_end_time
+
+            if (
+                "start_time" in fields_set
+                or "end_time" in fields_set
+            ):
+                entry.work_minutes = default_work_minutes
+
+        final_helper_ids = old_helper_ids
 
     # ---------------------------------------------------------
-    # 8. Eliminar Helpers removidos del evento
-    # ---------------------------------------------------------
-    entries_to_remove = [
-        entry
-        for entry in db_event.time_entries
-        if entry.helper_id not in requested_helper_ids
-    ]
-
-    for entry in entries_to_remove:
-        if entry.helper_payroll_period_id is not None:
-            raise ValueError(
-                f"Helper {entry.helper_id} cannot be removed because "
-                "the time entry is already assigned to a payroll period."
-            )
-
-        db.delete(entry)
-
-    # ---------------------------------------------------------
-    # 9. Guardar
+    # 9. Guardar cambios
     # ---------------------------------------------------------
     db.commit()
     db.refresh(db_event)
@@ -2268,14 +2369,10 @@ def update_helper_work_event(
     # ---------------------------------------------------------
     # 10. Recalcular días/helpers afectados
     # ---------------------------------------------------------
-    affected_helper_ids = (
-        old_helper_ids | requested_helper_ids
-    )
-
+    affected_helper_ids = old_helper_ids | final_helper_ids
     affected_payroll_ids = set()
 
     for helper_id in affected_helper_ids:
-        # Día anterior
         old_entries = _recalculate_helper_time_entries_for_day(
             db=db,
             helper_id=helper_id,
@@ -2288,12 +2385,11 @@ def update_helper_work_event(
                     entry.helper_payroll_period_id
                 )
 
-        # Día nuevo, sólo si cambió la fecha
-        if work_event.work_date != old_work_date:
+        if new_work_date != old_work_date:
             new_entries = _recalculate_helper_time_entries_for_day(
                 db=db,
                 helper_id=helper_id,
-                work_date=work_event.work_date,
+                work_date=new_work_date,
             )
 
             for entry in new_entries:
