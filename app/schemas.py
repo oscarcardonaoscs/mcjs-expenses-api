@@ -49,6 +49,18 @@ ClientPaymentStatus = Literal[
     "Collected",
 ]
 
+HelperTimeEntryPayrollFilter = Literal[
+    "Pending",
+    "Ready",
+    "Paid",
+]
+
+ClientPaymentDisplayStatus = Literal[
+    "Planned",
+    "Pending",
+    "Collected",
+]
+
 
 # ---------- Category ----------
 class CategoryBase(BaseModel):
@@ -448,17 +460,37 @@ class HelperTimeEntryUpdate(BaseModel):
 
 class HelperTimeEntryResponse(BaseModel):
     id: int
+
     helper_id: int
+    helper_name: Optional[str] = None
+
     work_event_id: Optional[int] = None
     helper_payroll_period_id: Optional[int] = None
+
     work_date: Date
+
     client_id: int
     client_name: Optional[str] = None
+
+    location_id: Optional[int] = None
+    location_name: Optional[str] = None
+
     start_time: Optional[Time] = None
     end_time: Optional[Time] = None
-    work_minutes: int
-    travel_minutes: int
-    notes: Optional[str] = None
+    work_minutes: int = 0
+
+    service_amount: Optional[DecimalCurrency] = None
+    service_type: Optional[ServiceType] = None
+    service_frequency: Optional[ServiceFrequency] = None
+
+    payment_method: Optional[ClientPaymentMethod] = None
+    client_payment_status: ClientPaymentDisplayStatus = "Planned"
+    payment_received_date: Optional[Date] = None
+
+    payroll_period_start: Optional[Date] = None
+    payroll_period_end: Optional[Date] = None
+    payroll_status: Optional[HelperPayrollStatus] = None
+
     created_at: Optional[DateTime] = None
     updated_at: Optional[DateTime] = None
 
@@ -773,7 +805,7 @@ class HelperWorkEventCreate(BaseModel):
             raise ValueError("End time must be after start time")
 
         # A paid event always receives a payment date.
-        if self.payment_status == "Paid" and self.payment_received_date is None:
+        if self.payment_status == "Collected" and self.payment_received_date is None:
             self.payment_received_date = self.work_date
 
         # Pending events must not carry a payment date.
@@ -826,7 +858,7 @@ class HelperWorkEventUpdate(BaseModel):
             self.payment_received_date = None
 
         if (
-            self.payment_status == "Paid"
+            self.payment_status == "Collected"
             and self.payment_received_date is None
             and self.work_date is not None
         ):

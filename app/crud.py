@@ -909,46 +909,106 @@ def get_helper_time_entries(
     skip: int = 0,
     limit: int = 100,
     helper_id: Optional[int] = None,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-    unassigned_only: bool = False,
+    client_id: Optional[int] = None,
+    payroll_status: Optional[str] = "Pending",
 ):
+    TimeEntry = models.HelperTimeEntry
+    Helper = models.Helper
+    Client = models.Client
+    WorkEvent = models.HelperWorkEvent
+    Location = models.ClientLocation
+    Payroll = models.HelperPayrollPeriod
+
     q = (
         db.query(
-            models.HelperTimeEntry,
-            models.Client.name.label("client_name"),
+            TimeEntry.id.label("id"),
+            TimeEntry.helper_id.label("helper_id"),
+            TimeEntry.work_event_id.label("work_event_id"),
+            TimeEntry.helper_payroll_period_id.label(
+                "helper_payroll_period_id"
+            ),
+            TimeEntry.work_date.label("work_date"),
+            TimeEntry.client_id.label("client_id"),
+            TimeEntry.start_time.label("start_time"),
+            TimeEntry.end_time.label("end_time"),
+            TimeEntry.work_minutes.label("work_minutes"),
+            TimeEntry.created_at.label("created_at"),
+            TimeEntry.updated_at.label("updated_at"),
+
+            Client.name.label("client_name"),
+
+            Helper.first_name.label("helper_first_name"),
+            Helper.last_name.label("helper_last_name"),
+
+            WorkEvent.location_id.label("location_id"),
+            WorkEvent.service_amount.label("service_amount"),
+            WorkEvent.service_type.label("service_type"),
+            WorkEvent.service_frequency.label("service_frequency"),
+            WorkEvent.payment_method.label("payment_method"),
+            WorkEvent.payment_status.label("stored_payment_status"),
+            WorkEvent.payment_received_date.label(
+                "payment_received_date"
+            ),
+
+            Location.location_name.label("location_name"),
+
+            Payroll.period_start.label("payroll_period_start"),
+            Payroll.period_end.label("payroll_period_end"),
+            Payroll.status.label("payroll_status"),
+        )
+        .select_from(TimeEntry)
+        .outerjoin(
+            Helper,
+            TimeEntry.helper_id == Helper.id,
         )
         .outerjoin(
-            models.Client,
-            models.HelperTimeEntry.client_id == models.Client.id,
+            Client,
+            TimeEntry.client_id == Client.id,
+        )
+        .outerjoin(
+            WorkEvent,
+            TimeEntry.work_event_id == WorkEvent.id,
+        )
+        .outerjoin(
+            Location,
+            WorkEvent.location_id == Location.id,
+        )
+        .outerjoin(
+            Payroll,
+            TimeEntry.helper_payroll_period_id == Payroll.id,
         )
     )
 
     if helper_id is not None:
         q = q.filter(
-            models.HelperTimeEntry.helper_id == helper_id
+            TimeEntry.helper_id == helper_id
         )
 
-    if date_from is not None:
+    if client_id is not None:
         q = q.filter(
-            models.HelperTimeEntry.work_date >= date_from
+            TimeEntry.client_id == client_id
         )
 
-    if date_to is not None:
+    if payroll_status == "Pending":
         q = q.filter(
-            models.HelperTimeEntry.work_date <= date_to
+            TimeEntry.helper_payroll_period_id.is_(None)
         )
 
-    if unassigned_only:
+    elif payroll_status == "Ready":
         q = q.filter(
-            models.HelperTimeEntry.helper_payroll_period_id.is_(None)
+            Payroll.status == "Ready"
+        )
+
+    elif payroll_status == "Paid":
+        q = q.filter(
+            Payroll.status == "Paid"
         )
 
     rows = (
         q.order_by(
-            models.HelperTimeEntry.work_date.desc(),
-            models.HelperTimeEntry.start_time.desc(),
-            models.HelperTimeEntry.id.desc(),
+            TimeEntry.work_date.desc(),
+            TimeEntry.start_time.desc(),
+            TimeEntry.id.desc(),
         )
         .offset(skip)
         .limit(limit)
@@ -957,26 +1017,69 @@ def get_helper_time_entries(
 
     results = []
 
-    for entry, client_name in rows:
+    for row in rows:
+        helper_name_parts = [
+            (row.helper_first_name or "").strip(),
+            (row.helper_last_name or "").strip(),
+        ]
+
+        helper_name = " ".join(
+            part
+            for part in helper_name_parts
+            if part
+        ) or None
+
+        # Planned is a display-only state.
+        # It means the service has not been performed yet.
+        if row.start_time is None or row.end_time is None:
+            client_payment_status = "Planned"
+        else:
+            client_payment_status = (
+                row.stored_payment_status or "Pending"
+            )
+
         results.append(
             schemas.HelperTimeEntryResponse(
-                id=entry.id,
-                helper_id=entry.helper_id,
+                id=row.id,
 
-                # Relación con el Work Event
-                work_event_id=entry.work_event_id,
+                helper_id=row.helper_id,
+                helper_name=helper_name,
 
-                helper_payroll_period_id=entry.helper_payroll_period_id,
-                work_date=entry.work_date,
-                client_id=entry.client_id,
-                client_name=client_name,
-                start_time=entry.start_time,
-                end_time=entry.end_time,
-                work_minutes=entry.work_minutes,
-                travel_minutes=entry.travel_minutes,
-                notes=entry.notes,
-                created_at=entry.created_at,
-                updated_at=entry.updated_at,
+                work_event_id=row.work_event_id,
+                helper_payroll_period_id=(
+                    row.helper_payroll_period_id
+                ),
+
+                work_date=row.work_date,
+
+                client_id=row.client_id,
+                client_name=row.client_name,
+
+                location_id=row.location_id,
+                location_name=row.location_name,
+
+                start_time=row.start_time,
+                end_time=row.end_time,
+                work_minutes=int(row.work_minutes or 0),
+
+                service_amount=row.service_amount,
+                service_type=row.service_type,
+                service_frequency=row.service_frequency,
+
+                payment_method=row.payment_method,
+                client_payment_status=client_payment_status,
+                payment_received_date=(
+                    row.payment_received_date
+                ),
+
+                payroll_period_start=(
+                    row.payroll_period_start
+                ),
+                payroll_period_end=row.payroll_period_end,
+                payroll_status=row.payroll_status,
+
+                created_at=row.created_at,
+                updated_at=row.updated_at,
             )
         )
 
@@ -1670,19 +1773,13 @@ def mark_helper_payroll_period_paid(
     return payroll
 
 
-def get_clients(
-    db: Session,
-    skip: int = 0,
-    limit: int = 100,
-):
+def get_clients(db: Session):
     return (
         db.query(models.Client)
         .options(
             selectinload(models.Client.locations)
         )
         .order_by(models.Client.name.asc())
-        .offset(skip)
-        .limit(limit)
         .all()
     )
 

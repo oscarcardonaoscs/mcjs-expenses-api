@@ -11,11 +11,9 @@ router = APIRouter(prefix="/clients", tags=["Clients"])
 
 @router.get("/", response_model=List[schemas.ClientResponse])
 def get_clients(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
-    return crud.get_clients(db=db, skip=skip, limit=limit)
+    return crud.get_clients(db=db)
 
 
 @router.get("/{client_id}", response_model=schemas.ClientResponse)

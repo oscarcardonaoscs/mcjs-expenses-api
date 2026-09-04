@@ -1,4 +1,3 @@
-from datetime import date
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -16,10 +15,14 @@ router = APIRouter(prefix="/helper-time-entries", tags=["Helper Time Entries"])
 def get_helper_time_entries(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+
     helper_id: Optional[int] = Query(None),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
-    unassigned_only: bool = Query(False),
+    client_id: Optional[int] = Query(None),
+
+    payroll_status: schemas.HelperTimeEntryPayrollFilter = Query(
+        "Pending"
+    ),
+
     db: Session = Depends(get_db),
 ):
     return crud.get_helper_time_entries(
@@ -27,9 +30,8 @@ def get_helper_time_entries(
         skip=skip,
         limit=limit,
         helper_id=helper_id,
-        date_from=date_from,
-        date_to=date_to,
-        unassigned_only=unassigned_only,
+        client_id=client_id,
+        payroll_status=payroll_status,
     )
 
 
