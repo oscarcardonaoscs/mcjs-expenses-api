@@ -910,7 +910,7 @@ def get_helper_time_entries(
     limit: int = 100,
     helper_id: Optional[int] = None,
     client_id: Optional[int] = None,
-    payroll_status: Optional[str] = "Pending",
+    payroll_status: Optional[str] = None,
 ):
     TimeEntry = models.HelperTimeEntry
     Helper = models.Helper

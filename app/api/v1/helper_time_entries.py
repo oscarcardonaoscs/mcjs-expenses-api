@@ -19,9 +19,9 @@ def get_helper_time_entries(
     helper_id: Optional[int] = Query(None),
     client_id: Optional[int] = Query(None),
 
-    payroll_status: schemas.HelperTimeEntryPayrollFilter = Query(
-        "Pending"
-    ),
+    payroll_status: Optional[
+        schemas.HelperTimeEntryPayrollFilter
+    ] = Query(None),
 
     db: Session = Depends(get_db),
 ):
