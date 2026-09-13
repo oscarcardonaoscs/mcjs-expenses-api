@@ -184,6 +184,64 @@ class ListPaymentAccountsResponse(BaseModel):
 
 
 # ---------- Expense ----------
+class ExpenseItemCreate(BaseModel):
+    category_id: int
+    expense_concept_id: Optional[int] = None
+    description: Optional[constr(strip_whitespace=True, max_length=255)] = None
+
+    helper_name: Optional[constr(strip_whitespace=True, max_length=100)] = None
+    task_project: Optional[constr(
+        strip_whitespace=True, max_length=120)] = None
+
+    quantity: Optional[DecimalQty] = None
+    unit: Optional[constr(strip_whitespace=True, max_length=30)] = None
+    unit_price: Optional[DecimalMoney] = None
+    gallons_miles: Optional[DecimalQty] = None
+    expense_type: Optional[constr(
+        strip_whitespace=True, max_length=100)] = None
+
+    subtotal: Optional[DecimalCurrency] = None
+
+    @model_validator(mode="after")
+    def validate_amount_source(self):
+        has_subtotal = self.subtotal is not None
+        has_quantity_and_price = (
+            self.quantity is not None and self.unit_price is not None
+        )
+
+        if not has_subtotal and not has_quantity_and_price:
+            raise ValueError(
+                "Each expense item requires subtotal or quantity and unit_price"
+            )
+
+        return self
+
+
+class ExpenseItemOut(BaseModel):
+    id: int
+    expense_id: int
+    category_id: int
+    expense_concept_id: Optional[int] = None
+    description: Optional[str] = None
+    helper_name: Optional[str] = None
+    task_project: Optional[str] = None
+    quantity: Optional[DecimalQty] = None
+    unit: Optional[str] = None
+    unit_price: Optional[DecimalMoney] = None
+    gallons_miles: Optional[DecimalQty] = None
+    expense_type: Optional[str] = None
+    subtotal: DecimalCurrency
+    tax_amount: DecimalCurrency
+    total: DecimalCurrency
+    category_name: Optional[str] = None
+    expense_concept_name: Optional[str] = None
+    created_at: Optional[DateTime] = None
+    updated_at: Optional[DateTime] = None
+
+    class Config:
+        from_attributes = True
+
+
 class ExpenseCreate(BaseModel):
     date: Date
     category_id: Optional[int] = None
@@ -211,8 +269,12 @@ class ExpenseCreate(BaseModel):
 
     payment_account_id: Optional[int] = None
 
+    subtotal: Optional[DecimalCurrency] = None
+    tax_amount: Optional[DecimalCurrency] = None
     total: Optional[DecimalMoney] = None
     notes: Optional[str] = None
+    items: Optional[List[ExpenseItemCreate]] = Field(
+        default=None, min_length=1)
 
 
 class ExpenseUpdate(BaseModel):
@@ -241,8 +303,12 @@ class ExpenseUpdate(BaseModel):
 
     payment_account_id: Optional[int] = None
 
+    subtotal: Optional[DecimalCurrency] = None
+    tax_amount: Optional[DecimalCurrency] = None
     total: Optional[DecimalMoney] = None
     notes: Optional[str] = None
+    items: Optional[List[ExpenseItemCreate]] = Field(
+        default=None, min_length=1)
 
 
 class ExpenseOut(BaseModel):
@@ -283,6 +349,7 @@ class ExpenseOut(BaseModel):
 
     created_at: Optional[DateTime] = None
     updated_at: Optional[DateTime] = None
+    items: List[ExpenseItemOut] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -772,6 +839,9 @@ class HelperWorkEventCreate(BaseModel):
     start_time: Optional[Time] = None
     end_time: Optional[Time] = None
 
+    alma_work_minutes: Optional[int] = Field(default=None, ge=0)
+    oscar_work_minutes: Optional[int] = Field(default=None, ge=0)
+
     service_amount: Optional[DecimalCurrency] = None
     service_type: Optional[ServiceType] = None
     service_frequency: Optional[ServiceFrequency] = None
@@ -822,6 +892,9 @@ class HelperWorkEventUpdate(BaseModel):
 
     start_time: Optional[Time] = None
     end_time: Optional[Time] = None
+
+    alma_work_minutes: Optional[int] = Field(default=None, ge=0)
+    oscar_work_minutes: Optional[int] = Field(default=None, ge=0)
 
     service_amount: Optional[DecimalCurrency] = None
     service_type: Optional[ServiceType] = None
@@ -890,6 +963,9 @@ class HelperWorkEventResponse(BaseModel):
     # Planned events may not have times yet.
     start_time: Optional[Time] = None
     end_time: Optional[Time] = None
+
+    alma_work_minutes: Optional[int] = None
+    oscar_work_minutes: Optional[int] = None
 
     service_amount: Optional[DecimalCurrency] = None
     service_type: Optional[ServiceType] = None

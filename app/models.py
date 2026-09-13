@@ -21,6 +21,11 @@ class Category(Base):
     name = Column(String(100), unique=True, nullable=False)
 
     expenses = relationship("Expense", back_populates="category")
+    expense_items = relationship(
+        "ExpenseItem",
+        back_populates="category",
+        passive_deletes=True,
+    )
     expense_concepts = relationship(
         "ExpenseConcept",
         back_populates="category",
@@ -60,6 +65,11 @@ class ExpenseConcept(Base):
     )
     expenses = relationship(
         "Expense",
+        back_populates="expense_concept",
+        passive_deletes=True,
+    )
+    expense_items = relationship(
+        "ExpenseItem",
         back_populates="expense_concept",
         passive_deletes=True,
     )
@@ -193,12 +203,108 @@ class Expense(Base):
     )
     vendor = relationship("Vendor", back_populates="expenses")
     payment_account = relationship("PaymentAccount", back_populates="expenses")
+    items = relationship(
+        "ExpenseItem",
+        back_populates="expense",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ExpenseItem.id",
+    )
+
+    @property
+    def category_name(self):
+        return self.category.name if self.category else None
+
+    @property
+    def expense_concept_name(self):
+        return self.expense_concept.name if self.expense_concept else None
+
+    @property
+    def vendor_name(self):
+        return self.vendor.name if self.vendor else None
+
+    @property
+    def payment_account_last4(self):
+        return self.payment_account.last4 if self.payment_account else None
 
     __table_args__ = (
         Index(
             "idx_expenses_expense_concept_id",
             "expense_concept_id",
         ),
+    )
+
+
+class ExpenseItem(Base):
+    __tablename__ = "expense_items"
+
+    id = Column(Integer, primary_key=True)
+    expense_id = Column(
+        Integer,
+        ForeignKey("expenses.id", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=False,
+    )
+    category_id = Column(
+        Integer,
+        ForeignKey("categories.id", ondelete="RESTRICT", onupdate="CASCADE"),
+        nullable=False,
+    )
+    expense_concept_id = Column(
+        Integer,
+        ForeignKey(
+            "expense_concepts.id",
+            ondelete="SET NULL",
+            onupdate="CASCADE",
+        ),
+        nullable=True,
+    )
+
+    description = Column(String(255), nullable=True)
+    helper_name = Column(String(100), nullable=True)
+    task_project = Column(String(120), nullable=True)
+
+    quantity = Column(DECIMAL(10, 3), nullable=True)
+    unit = Column(String(30), nullable=True)
+    unit_price = Column(DECIMAL(10, 3), nullable=True)
+    gallons_miles = Column(DECIMAL(10, 3), nullable=True)
+    expense_type = Column(String(100), nullable=True)
+
+    subtotal = Column(DECIMAL(10, 2), nullable=False)
+    tax_amount = Column(
+        DECIMAL(10, 2),
+        nullable=False,
+        default=Decimal("0.00"),
+        server_default="0.00",
+    )
+    total = Column(DECIMAL(10, 2), nullable=False)
+
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    expense = relationship("Expense", back_populates="items")
+    category = relationship("Category", back_populates="expense_items")
+    expense_concept = relationship(
+        "ExpenseConcept",
+        back_populates="expense_items",
+    )
+
+    @property
+    def category_name(self):
+        return self.category.name if self.category else None
+
+    @property
+    def expense_concept_name(self):
+        return self.expense_concept.name if self.expense_concept else None
+
+    __table_args__ = (
+        Index("idx_expense_items_expense_id", "expense_id"),
+        Index("idx_expense_items_category_id", "category_id"),
+        Index("idx_expense_items_expense_concept_id", "expense_concept_id"),
     )
 
 
@@ -534,6 +640,9 @@ class HelperWorkEvent(Base):
     )
 
     payment_received_date = Column(Date, nullable=True)
+
+    alma_work_minutes = Column(Integer, nullable=True)
+    oscar_work_minutes = Column(Integer, nullable=True)
 
     client = relationship("Client")
 

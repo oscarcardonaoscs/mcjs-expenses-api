@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import select, extract, func
+from sqlalchemy import select, extract, func, or_
 from datetime import date, time
 import calendar
 from . import models, schemas
@@ -406,8 +406,273 @@ def _compute_from_parts(unit_price, quantity, apply_tax_bool: bool):
     return sub, tax, tot
 
 
+def _expense_item_subtotal(item: schemas.ExpenseItemCreate) -> Decimal:
+    if item.subtotal is not None:
+        return _money(Decimal(str(item.subtotal)))
+
+    return _money(
+        Decimal(str(item.quantity)) * Decimal(str(item.unit_price))
+    )
+
+
+def _validate_expense_item(db: Session, item: schemas.ExpenseItemCreate):
+    if not get_category(db, item.category_id):
+        raise ValueError(f"Category {item.category_id} not found")
+
+    if item.expense_concept_id is not None:
+        _validate_expense_concept(
+            db=db,
+            expense_concept_id=item.expense_concept_id,
+            category_id=item.category_id,
+            require_active=True,
+        )
+
+
+def _resolve_purchase_amounts(
+    *,
+    item_subtotals: list[Decimal],
+    apply_tax: bool,
+    declared_subtotal=None,
+    declared_tax=None,
+    declared_total=None,
+):
+    subtotal = _money(sum(item_subtotals, Decimal("0.00")))
+
+    if subtotal <= 0:
+        raise ValueError("Expense subtotal must be greater than zero")
+
+    if declared_subtotal is not None:
+        supplied_subtotal = _money(Decimal(str(declared_subtotal)))
+        if supplied_subtotal != subtotal:
+            raise ValueError(
+                f"Expense subtotal ({supplied_subtotal}) does not match "
+                f"the sum of items ({subtotal})"
+            )
+
+    if declared_tax is not None:
+        tax_amount = _money(Decimal(str(declared_tax)))
+    elif declared_total is not None:
+        tax_amount = _money(Decimal(str(declared_total)) - subtotal)
+        if tax_amount < 0:
+            raise ValueError("Expense total cannot be less than subtotal")
+    else:
+        tax_amount = (
+            _money(subtotal * TAX_RATE) if apply_tax else Decimal("0.00")
+        )
+
+    total = _money(subtotal + tax_amount)
+
+    if declared_total is not None:
+        supplied_total = _money(Decimal(str(declared_total)))
+        if supplied_total != total:
+            raise ValueError(
+                f"Expense total ({supplied_total}) does not equal "
+                f"subtotal plus tax ({total})"
+            )
+
+    return subtotal, tax_amount, total
+
+
+def _allocate_item_taxes(
+    item_subtotals: list[Decimal],
+    tax_amount: Decimal,
+) -> list[Decimal]:
+    subtotal = sum(item_subtotals, Decimal("0.00"))
+    allocated: list[Decimal] = []
+    allocated_so_far = Decimal("0.00")
+
+    for index, item_subtotal in enumerate(item_subtotals):
+        if index == len(item_subtotals) - 1:
+            item_tax = _money(tax_amount - allocated_so_far)
+        else:
+            item_tax = _money(tax_amount * item_subtotal / subtotal)
+            allocated_so_far += item_tax
+        allocated.append(item_tax)
+
+    return allocated
+
+
+def _build_expense_items(
+    db: Session,
+    expense: models.Expense,
+    items: list[schemas.ExpenseItemCreate],
+    tax_amount: Decimal,
+):
+    item_subtotals = []
+    for item in items:
+        _validate_expense_item(db, item)
+        item_subtotals.append(_expense_item_subtotal(item))
+
+    allocated_taxes = _allocate_item_taxes(item_subtotals, tax_amount)
+    objects = []
+
+    for item, item_subtotal, item_tax in zip(
+        items, item_subtotals, allocated_taxes
+    ):
+        objects.append(
+            models.ExpenseItem(
+                expense=expense,
+                category_id=item.category_id,
+                expense_concept_id=item.expense_concept_id,
+                description=item.description or None,
+                helper_name=item.helper_name or None,
+                task_project=item.task_project or None,
+                quantity=(
+                    _qty(Decimal(str(item.quantity)))
+                    if item.quantity is not None else None
+                ),
+                unit=item.unit or None,
+                unit_price=(
+                    _money(Decimal(str(item.unit_price)))
+                    if item.unit_price is not None else None
+                ),
+                gallons_miles=(
+                    _qty(Decimal(str(item.gallons_miles)))
+                    if item.gallons_miles is not None else None
+                ),
+                expense_type=item.expense_type or None,
+                subtotal=item_subtotal,
+                tax_amount=item_tax,
+                total=_money(item_subtotal + item_tax),
+            )
+        )
+
+    return objects
+
+
+def _copy_single_item_to_legacy_columns(
+    expense: models.Expense,
+    items: list[schemas.ExpenseItemCreate],
+):
+    if len(items) != 1:
+        expense.category_id = None
+        expense.expense_concept_id = None
+        expense.description = None
+        expense.helper_name = None
+        expense.task_project = None
+        expense.quantity = None
+        expense.unit = None
+        expense.unit_price = None
+        expense.gallons_miles = None
+        expense.expense_type = None
+        return
+
+    item = items[0]
+    expense.category_id = item.category_id
+    expense.expense_concept_id = item.expense_concept_id
+    expense.description = item.description or None
+    expense.helper_name = item.helper_name or None
+    expense.task_project = item.task_project or None
+    expense.quantity = (
+        _qty(Decimal(str(item.quantity)))
+        if item.quantity is not None else None
+    )
+    expense.unit = item.unit or None
+    expense.unit_price = (
+        _money(Decimal(str(item.unit_price)))
+        if item.unit_price is not None else None
+    )
+    expense.gallons_miles = (
+        _qty(Decimal(str(item.gallons_miles)))
+        if item.gallons_miles is not None else None
+    )
+    expense.expense_type = item.expense_type or None
+
+
+def _sync_legacy_expense_item(db: Session, expense: models.Expense):
+    """Keep single-item expenses compatible with the current frontend."""
+    existing_items = list(expense.items)
+
+    # Never let the legacy form overwrite a purchase that is already split.
+    if len(existing_items) > 1:
+        return
+
+    if expense.category_id is None:
+        return
+
+    item_subtotal = _money(
+        expense.subtotal
+        if expense.subtotal is not None
+        else Decimal(str(expense.total)) - Decimal(str(expense.tax_amount or 0))
+    )
+    item_tax = _money(Decimal(str(expense.tax_amount or 0)))
+
+    if existing_items:
+        item = existing_items[0]
+    else:
+        item = models.ExpenseItem(expense=expense)
+        db.add(item)
+
+    item.category_id = expense.category_id
+    item.expense_concept_id = expense.expense_concept_id
+    item.description = expense.description
+    item.helper_name = expense.helper_name
+    item.task_project = expense.task_project
+    item.quantity = expense.quantity
+    item.unit = expense.unit
+    item.unit_price = expense.unit_price
+    item.gallons_miles = expense.gallons_miles
+    item.expense_type = expense.expense_type
+    item.subtotal = item_subtotal
+    item.tax_amount = item_tax
+    item.total = _money(item_subtotal + item_tax)
+
+
+def _create_expense_with_items(
+    db: Session,
+    data: schemas.ExpenseCreate,
+):
+    items = data.items or []
+    item_subtotals = []
+
+    for item in items:
+        _validate_expense_item(db, item)
+        item_subtotals.append(_expense_item_subtotal(item))
+
+    apply_tax = True if data.apply_tax is None else bool(data.apply_tax)
+    subtotal, tax_amount, total = _resolve_purchase_amounts(
+        item_subtotals=item_subtotals,
+        apply_tax=apply_tax,
+        declared_subtotal=data.subtotal,
+        declared_tax=data.tax_amount,
+        declared_total=data.total,
+    )
+
+    expense = models.Expense(
+        date=data.date,
+        vendor_id=data.vendor_id,
+        apply_tax=apply_tax,
+        subtotal=subtotal,
+        tax_amount=tax_amount,
+        total=total,
+        payment_method=data.payment_method,
+        payment_account_id=data.payment_account_id,
+        paid=bool(data.paid) if data.paid is not None else False,
+        receipt_url=(data.receipt_url or "").strip() or None,
+        notes=(data.notes or "").strip() or None,
+    )
+    _copy_single_item_to_legacy_columns(expense, items)
+
+    try:
+        db.add(expense)
+        expense.items = _build_expense_items(
+            db=db,
+            expense=expense,
+            items=items,
+            tax_amount=tax_amount,
+        )
+        db.commit()
+        return get_expense(db, expense.id)
+    except Exception:
+        db.rollback()
+        raise
+
+
 def create_expense(db: Session, data: schemas.ExpenseCreate):
     logger.info("[create_expense] Received data: %s", data.model_dump())
+
+    if data.items is not None:
+        return _create_expense_with_items(db, data)
 
     is_helpers = (data.expense_type or "").strip().lower() == "helpers"
 
@@ -518,15 +783,20 @@ def create_expense(db: Session, data: schemas.ExpenseCreate):
         notes=notes,
     )
 
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
+    try:
+        db.add(obj)
+        db.flush()
+        _sync_legacy_expense_item(db, obj)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     logger.info(
         "[create_expense] Inserted ID=%s | type=%s | subtotal=%s | tax=%s | total=%s",
         obj.id, obj.expense_type, obj.subtotal, obj.tax_amount, obj.total
     )
-    return obj
+    return get_expense(db, obj.id)
 
 
 def list_expenses(
@@ -580,7 +850,12 @@ def list_expenses(
     )
 
     if category_id is not None:
-        stmt = stmt.where(E.category_id == category_id)
+        stmt = stmt.where(
+            or_(
+                E.category_id == category_id,
+                E.items.any(models.ExpenseItem.category_id == category_id),
+            )
+        )
 
     if month is not None:
         stmt = stmt.where(extract("month", E.date) == month)
@@ -590,112 +865,263 @@ def list_expenses(
 
     stmt = stmt.order_by(E.date.desc(), E.id.desc())
 
-    rows = db.execute(stmt).mappings().all()
+    rows = [dict(row) for row in db.execute(stmt).mappings().all()]
+    expense_ids = [row["id"] for row in rows]
+    items_by_expense_id = {expense_id: [] for expense_id in expense_ids}
+
+    if expense_ids:
+        item_stmt = (
+            select(models.ExpenseItem)
+            .options(
+                joinedload(models.ExpenseItem.category),
+                joinedload(models.ExpenseItem.expense_concept),
+            )
+            .where(models.ExpenseItem.expense_id.in_(expense_ids))
+            .order_by(models.ExpenseItem.expense_id, models.ExpenseItem.id)
+        )
+        for item in db.scalars(item_stmt).all():
+            items_by_expense_id[item.expense_id].append(item)
+
+    for row in rows:
+        row["items"] = items_by_expense_id[row["id"]]
+
     return [schemas.ExpenseOut(**row) for row in rows]
 
 
-def update_expense(db: Session, expense_id: int, data: schemas.ExpenseUpdate):
+def get_expense(db: Session, expense_id: int):
+    stmt = (
+        select(models.Expense)
+        .options(
+            joinedload(models.Expense.category),
+            joinedload(models.Expense.expense_concept),
+            joinedload(models.Expense.vendor),
+            joinedload(models.Expense.payment_account),
+            selectinload(models.Expense.items).joinedload(
+                models.ExpenseItem.category
+            ),
+            selectinload(models.Expense.items).joinedload(
+                models.ExpenseItem.expense_concept
+            ),
+        )
+        .where(models.Expense.id == expense_id)
+    )
+    return db.scalar(stmt)
+
+
+def update_expense(
+    db: Session,
+    expense_id: int,
+    data: schemas.ExpenseUpdate,
+):
     obj = db.get(models.Expense, expense_id)
+
     if not obj:
         raise ValueError("Expense not found")
 
     fields_set = data.model_fields_set
 
-    new_category_id = (
-        data.category_id
-        if "category_id" in fields_set
-        else obj.category_id
-    )
-    new_expense_concept_id = (
-        data.expense_concept_id
-        if "expense_concept_id" in fields_set
-        else obj.expense_concept_id
-    )
-
-    if new_expense_concept_id is not None and (
-        "expense_concept_id" in fields_set
-        or "category_id" in fields_set
-    ):
-        _validate_expense_concept(
-            db=db,
-            expense_concept_id=new_expense_concept_id,
-            category_id=new_category_id,
-            require_active="expense_concept_id" in fields_set,
-        )
-
-    if data.date is not None:
-        obj.date = data.date
-
-    if "category_id" in fields_set:
-        obj.category_id = data.category_id
-
-    if "expense_concept_id" in fields_set:
-        obj.expense_concept_id = data.expense_concept_id
-
-    if data.vendor_id is not None:
-        obj.vendor_id = data.vendor_id
-
-    if data.description is not None:
-        obj.description = data.description.strip() if data.description else None
-    if data.unit is not None:
-        obj.unit = data.unit.strip() if data.unit else None
-    if data.expense_type is not None:
-        obj.expense_type = data.expense_type.strip() if data.expense_type else None
-    if data.receipt_url is not None:
-        obj.receipt_url = data.receipt_url.strip() if data.receipt_url else None
-    if data.notes is not None:
-        obj.notes = data.notes.strip() if data.notes else None
-
-    if data.helper_name is not None:
-        obj.helper_name = data.helper_name.strip() if data.helper_name else None
-    if data.task_project is not None:
-        obj.task_project = data.task_project.strip() if data.task_project else None
-    if data.paid is not None:
-        obj.paid = bool(data.paid)
-
-    if data.payment_method is not None:
-        obj.payment_method = data.payment_method
-    if data.payment_account_id is not None:
-        obj.payment_account_id = data.payment_account_id
-
-    if data.quantity is not None:
-        obj.quantity = _qty(Decimal(str(data.quantity)))
-    if data.unit_price is not None:
-        obj.unit_price = _money(Decimal(str(data.unit_price)))
-    if data.gallons_miles is not None:
-        obj.gallons_miles = _qty(Decimal(str(data.gallons_miles)))
-    if data.apply_tax is not None:
-        obj.apply_tax = bool(data.apply_tax)
-
-    is_helpers = (obj.expense_type or "").strip().lower() == "helpers"
-    has_parts = (obj.unit_price is not None and obj.quantity is not None)
-
-    if is_helpers:
-        q = obj.quantity or Decimal("0")
-        p = obj.unit_price or Decimal("0")
-        obj.subtotal = _money(q * p)
-        obj.tax_amount = Decimal("0.00")
-        obj.total = obj.subtotal
-        obj.apply_tax = False
-    else:
-        if has_parts:
-            sub, tax, tot = _compute_from_parts(
-                unit_price=obj.unit_price,
-                quantity=obj.quantity,
-                apply_tax_bool=bool(obj.apply_tax)
+    try:
+        # Evitar que un formulario antiguo sobrescriba un ticket dividido.
+        if "items" not in fields_set and len(obj.items) > 1:
+            raise ValueError(
+                "This expense contains multiple items. "
+                "Use the updated form and include items."
             )
-            obj.subtotal = sub
-            obj.tax_amount = tax
-            obj.total = tot
-        else:
-            if data.total is not None:
-                obj.total = _money(Decimal(str(data.total)))
-            obj.subtotal = None
-            obj.tax_amount = Decimal("0.00")
 
-    db.commit()
-    db.refresh(obj)
-    return obj
+        if "items" in fields_set and not data.items:
+            raise ValueError(
+                "An expense must contain at least one item."
+            )
+
+        # Validación de categoría/concepto para el formato anterior.
+        # Cuando recibimos items[], cada partida se valida por separado.
+        if "items" not in fields_set:
+            new_category_id = (
+                data.category_id
+                if "category_id" in fields_set
+                else obj.category_id
+            )
+
+            new_expense_concept_id = (
+                data.expense_concept_id
+                if "expense_concept_id" in fields_set
+                else obj.expense_concept_id
+            )
+
+            if new_expense_concept_id is not None and (
+                "expense_concept_id" in fields_set
+                or "category_id" in fields_set
+            ):
+                _validate_expense_concept(
+                    db=db,
+                    expense_concept_id=new_expense_concept_id,
+                    category_id=new_category_id,
+                    require_active=(
+                        "expense_concept_id" in fields_set
+                    ),
+                )
+
+        if data.date is not None:
+            obj.date = data.date
+
+        if "category_id" in fields_set:
+            obj.category_id = data.category_id
+
+        if "expense_concept_id" in fields_set:
+            obj.expense_concept_id = data.expense_concept_id
+
+        # Permitir limpiar estos campos enviando null.
+        if "vendor_id" in fields_set:
+            obj.vendor_id = data.vendor_id
+
+        if "payment_method" in fields_set:
+            obj.payment_method = data.payment_method
+
+        if "payment_account_id" in fields_set:
+            obj.payment_account_id = data.payment_account_id
+
+        if data.description is not None:
+            obj.description = data.description.strip() or None
+
+        if data.unit is not None:
+            obj.unit = data.unit.strip() or None
+
+        if data.expense_type is not None:
+            obj.expense_type = data.expense_type.strip() or None
+
+        if data.receipt_url is not None:
+            obj.receipt_url = data.receipt_url.strip() or None
+
+        if data.notes is not None:
+            obj.notes = data.notes.strip() or None
+
+        if data.helper_name is not None:
+            obj.helper_name = data.helper_name.strip() or None
+
+        if data.task_project is not None:
+            obj.task_project = data.task_project.strip() or None
+
+        if data.paid is not None:
+            obj.paid = bool(data.paid)
+
+        if data.quantity is not None:
+            obj.quantity = _qty(Decimal(str(data.quantity)))
+
+        if data.unit_price is not None:
+            obj.unit_price = _money(Decimal(str(data.unit_price)))
+
+        if data.gallons_miles is not None:
+            obj.gallons_miles = _qty(
+                Decimal(str(data.gallons_miles))
+            )
+
+        if data.apply_tax is not None:
+            obj.apply_tax = bool(data.apply_tax)
+
+        # Nuevo formulario: cabecera + partidas.
+        if "items" in fields_set:
+            items = data.items
+            item_subtotals = []
+
+            for item in items:
+                _validate_expense_item(db, item)
+                item_subtotals.append(
+                    _expense_item_subtotal(item)
+                )
+
+            declared_tax = None
+
+            if "tax_amount" in fields_set:
+                declared_tax = data.tax_amount
+            elif (
+                "total" not in fields_set
+                and "apply_tax" not in fields_set
+            ):
+                declared_tax = obj.tax_amount
+
+            subtotal, tax_amount, total = (
+                _resolve_purchase_amounts(
+                    item_subtotals=item_subtotals,
+                    apply_tax=bool(obj.apply_tax),
+                    declared_subtotal=(
+                        data.subtotal
+                        if "subtotal" in fields_set
+                        else None
+                    ),
+                    declared_tax=declared_tax,
+                    declared_total=(
+                        data.total
+                        if "total" in fields_set
+                        else None
+                    ),
+                )
+            )
+
+            obj.subtotal = subtotal
+            obj.tax_amount = tax_amount
+            obj.total = total
+
+            _copy_single_item_to_legacy_columns(obj, items)
+
+            obj.items = _build_expense_items(
+                db=db,
+                expense=obj,
+                items=items,
+                tax_amount=tax_amount,
+            )
+
+        else:
+            # Compatibilidad con el formulario anterior.
+            is_helpers = (
+                (obj.expense_type or "").strip().lower()
+                == "helpers"
+            )
+
+            has_parts = (
+                obj.unit_price is not None
+                and obj.quantity is not None
+            )
+
+            if is_helpers:
+                quantity = obj.quantity or Decimal("0")
+                unit_price = obj.unit_price or Decimal("0")
+
+                obj.subtotal = _money(quantity * unit_price)
+                obj.tax_amount = Decimal("0.00")
+                obj.total = obj.subtotal
+                obj.apply_tax = False
+
+            elif has_parts:
+                subtotal, tax_amount, total = (
+                    _compute_from_parts(
+                        unit_price=obj.unit_price,
+                        quantity=obj.quantity,
+                        apply_tax_bool=bool(obj.apply_tax),
+                    )
+                )
+
+                obj.subtotal = subtotal
+                obj.tax_amount = tax_amount
+                obj.total = total
+
+            else:
+                if data.total is not None:
+                    obj.total = _money(
+                        Decimal(str(data.total))
+                    )
+
+                obj.subtotal = None
+                obj.tax_amount = Decimal("0.00")
+
+            _sync_legacy_expense_item(db, obj)
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
+    return get_expense(db, obj.id)
 
 
 def delete_expense(db: Session, expense_id: int):
@@ -771,58 +1197,91 @@ def delete_payment_account(db: Session, account_id: int):
     db.commit()
 
 
-def report_annual_expenses_by_category(db: Session, year: int) -> schemas.AnnualExpensesByCategoryResponse:
+def report_annual_expenses_by_category(
+    db: Session,
+    year: int,
+) -> schemas.AnnualExpensesByCategoryResponse:
     """
-    Aggregate expenses by month and category for a given year.
+    Aggregate expense-item totals by month and category for a given year.
+
+    The expense date comes from the parent expense, while category and
+    amount come from expense_items.
     """
     if not year:
         year = date.today().year
 
+    year_expression = func.year(models.Expense.date)
+    month_expression = func.month(models.Expense.date)
+
     stmt = (
         select(
-            func.year(models.Expense.date).label("y"),
-            func.month(models.Expense.date).label("m"),
+            year_expression.label("y"),
+            month_expression.label("m"),
             models.Category.name.label("category"),
-            func.sum(models.Expense.total).label("total"),
+            func.sum(models.ExpenseItem.total).label("total"),
         )
-        .join(models.Category, models.Expense.category_id == models.Category.id)
-        .where(func.year(models.Expense.date) == year)
-        .group_by("y", "m", models.Category.name)
-        .order_by("y", "m", models.Category.name)
+        .select_from(models.ExpenseItem)
+        .join(
+            models.Expense,
+            models.ExpenseItem.expense_id == models.Expense.id,
+        )
+        .join(
+            models.Category,
+            models.ExpenseItem.category_id == models.Category.id,
+        )
+        .where(year_expression == year)
+        .group_by(
+            year_expression,
+            month_expression,
+            models.Category.id,
+            models.Category.name,
+        )
+        .order_by(
+            year_expression,
+            month_expression,
+            models.Category.name,
+        )
     )
 
     rows = db.execute(stmt).all()
 
     buckets: dict[str, dict] = {}
-    for y, m, category, total in rows:
-        ym_key = f"{int(y):04d}-{int(m):02d}"
-        if ym_key not in buckets:
-            buckets[ym_key] = {
+
+    for row_year, row_month, category, total in rows:
+        month_key = f"{int(row_year):04d}-{int(row_month):02d}"
+
+        if month_key not in buckets:
+            buckets[month_key] = {
                 "categories": {},
                 "total": Decimal("0.00"),
             }
 
-        money_total = _money(total)
-        buckets[ym_key]["categories"][category] = money_total
-        buckets[ym_key]["total"] = _money(
-            buckets[ym_key]["total"] + money_total)
+        category_total = _money(total)
+
+        buckets[month_key]["categories"][category] = category_total
+        buckets[month_key]["total"] = _money(
+            buckets[month_key]["total"] + category_total
+        )
 
     items: list[schemas.MonthlyCategoryTotals] = []
-    for ym in sorted(buckets.keys()):
-        _, mm = ym.split("-")
-        month_label = calendar.month_abbr[int(mm)]
-        bucket = buckets[ym]
+
+    for month_key in sorted(buckets):
+        _, month_number = month_key.split("-")
+        bucket = buckets[month_key]
 
         items.append(
             schemas.MonthlyCategoryTotals(
-                month=ym,
-                month_label=month_label,
+                month=month_key,
+                month_label=calendar.month_abbr[int(month_number)],
                 categories=bucket["categories"],
                 total=_money(bucket["total"]),
             )
         )
 
-    return schemas.AnnualExpensesByCategoryResponse(year=year, items=items)
+    return schemas.AnnualExpensesByCategoryResponse(
+        year=year,
+        items=items,
+    )
 
 
 # ---------- Helpers ----------
@@ -2073,6 +2532,10 @@ def create_helper_work_event(
         work_date=work_event.work_date,
         start_time=work_event.start_time,
         end_time=work_event.end_time,
+
+        alma_work_minutes=work_event.alma_work_minutes,
+        oscar_work_minutes=work_event.oscar_work_minutes,
+
         service_amount=(
             _money(Decimal(str(work_event.service_amount)))
             if work_event.service_amount is not None
@@ -2334,6 +2797,12 @@ def update_helper_work_event(
 
     if "payment_method" in fields_set:
         db_event.payment_method = work_event.payment_method
+
+    if "alma_work_minutes" in fields_set:
+        db_event.alma_work_minutes = work_event.alma_work_minutes
+
+    if "oscar_work_minutes" in fields_set:
+        db_event.oscar_work_minutes = work_event.oscar_work_minutes
 
     if "notes" in fields_set:
         db_event.notes = (
