@@ -986,3 +986,54 @@ class HelperWorkEventResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# ---------- Service History ----------
+
+
+class ServiceHistoryTeamMember(BaseModel):
+    name: str
+    work_minutes: int = Field(ge=0)
+
+
+class ServiceHistoryItem(BaseModel):
+    id: int
+    work_date: Date
+
+    client_id: int
+    client_name: str
+
+    location_id: Optional[int] = None
+    location_name: Optional[str] = None
+
+    service_type: Optional[ServiceType] = None
+    service_frequency: Optional[ServiceFrequency] = None
+    service_amount: Optional[DecimalCurrency] = None
+
+    start_time: Optional[Time] = None
+    end_time: Optional[Time] = None
+    duration_minutes: int = Field(default=0, ge=0)
+
+    team: List[ServiceHistoryTeamMember] = Field(
+        default_factory=list
+    )
+    total_labor_minutes: int = Field(default=0, ge=0)
+
+    payment_status: ClientPaymentStatus
+    payment_method: Optional[ClientPaymentMethod] = None
+    payment_received_date: Optional[Date] = None
+
+    notes: Optional[str] = None
+
+
+class ServiceHistorySummary(BaseModel):
+    services: int = Field(default=0, ge=0)
+    total_amount: DecimalCurrency
+    collected_amount: DecimalCurrency
+    pending_amount: DecimalCurrency
+
+
+class ServiceHistoryResponse(BaseModel):
+    summary: ServiceHistorySummary
+    items: List[ServiceHistoryItem] = Field(
+        default_factory=list
+    )

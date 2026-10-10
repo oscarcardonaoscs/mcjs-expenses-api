@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import select, extract, func, or_
+from sqlalchemy import select, extract, func, or_, case
 from datetime import date, time
 import calendar
 from . import models, schemas
@@ -2976,3 +2976,235 @@ def update_helper_work_event(
     db.refresh(db_event)
 
     return db_event
+
+
+# ---------- Service History ----------
+
+
+def get_service_history(
+    db: Session,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    client_id: Optional[int] = None,
+    service_type: Optional[str] = None,
+    payment_status: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+):
+    query = db.query(models.HelperWorkEvent)
+
+    if date_from is not None:
+        query = query.filter(
+            models.HelperWorkEvent.work_date >= date_from
+        )
+
+    if date_to is not None:
+        query = query.filter(
+            models.HelperWorkEvent.work_date <= date_to
+        )
+
+    if client_id is not None:
+        query = query.filter(
+            models.HelperWorkEvent.client_id == client_id
+        )
+
+    if service_type is not None:
+        query = query.filter(
+            models.HelperWorkEvent.service_type == service_type
+        )
+
+    if payment_status is not None:
+        query = query.filter(
+            models.HelperWorkEvent.payment_status == payment_status
+        )
+
+    if payment_method is not None:
+        query = query.filter(
+            models.HelperWorkEvent.payment_method == payment_method
+        )
+
+    summary_row = (
+        query.with_entities(
+            func.count(
+                models.HelperWorkEvent.id
+            ).label("services"),
+            func.coalesce(
+                func.sum(models.HelperWorkEvent.service_amount),
+                0,
+            ).label("total_amount"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            models.HelperWorkEvent.payment_status
+                            == "Collected",
+                            models.HelperWorkEvent.service_amount,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("collected_amount"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            models.HelperWorkEvent.payment_status
+                            == "Pending",
+                            models.HelperWorkEvent.service_amount,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("pending_amount"),
+        )
+        .one()
+    )
+
+    events = (
+        query.options(
+            joinedload(models.HelperWorkEvent.client),
+            joinedload(models.HelperWorkEvent.location),
+            joinedload(
+                models.HelperWorkEvent.time_entries
+            ).joinedload(
+                models.HelperTimeEntry.helper
+            ),
+        )
+        .order_by(
+            models.HelperWorkEvent.work_date.desc(),
+            models.HelperWorkEvent.start_time.desc(),
+            models.HelperWorkEvent.id.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+
+    for event in events:
+        duration_minutes = 0
+
+        if (
+            event.start_time is not None
+            and event.end_time is not None
+        ):
+            try:
+                duration_minutes = _minutes_between(
+                    event.start_time,
+                    event.end_time,
+                )
+            except ValueError:
+                duration_minutes = 0
+
+        team = []
+
+        alma_minutes = int(event.alma_work_minutes or 0)
+
+        if alma_minutes > 0:
+            team.append(
+                schemas.ServiceHistoryTeamMember(
+                    name="Alma",
+                    work_minutes=alma_minutes,
+                )
+            )
+
+        oscar_minutes = int(event.oscar_work_minutes or 0)
+
+        if oscar_minutes > 0:
+            team.append(
+                schemas.ServiceHistoryTeamMember(
+                    name="Oscar",
+                    work_minutes=oscar_minutes,
+                )
+            )
+
+        for entry in event.time_entries:
+            if entry.helper is None:
+                continue
+
+            helper_name_parts = [
+                (entry.helper.first_name or "").strip(),
+                (entry.helper.last_name or "").strip(),
+            ]
+
+            helper_name = " ".join(
+                part
+                for part in helper_name_parts
+                if part
+            )
+
+            if not helper_name:
+                helper_name = "Helper {}".format(
+                    entry.helper_id
+                )
+
+            team.append(
+                schemas.ServiceHistoryTeamMember(
+                    name=helper_name,
+                    work_minutes=int(entry.work_minutes or 0),
+                )
+            )
+
+        total_labor_minutes = sum(
+            member.work_minutes
+            for member in team
+        )
+
+        client_name = (
+            event.client.name
+            if event.client is not None
+            else "Client {}".format(event.client_id)
+        )
+
+        location_name = (
+            event.location.location_name
+            if event.location is not None
+            else None
+        )
+
+        items.append(
+            schemas.ServiceHistoryItem(
+                id=event.id,
+                work_date=event.work_date,
+                client_id=event.client_id,
+                client_name=client_name,
+                location_id=event.location_id,
+                location_name=location_name,
+                service_type=event.service_type,
+                service_frequency=event.service_frequency,
+                service_amount=event.service_amount,
+                start_time=event.start_time,
+                end_time=event.end_time,
+                duration_minutes=duration_minutes,
+                team=team,
+                total_labor_minutes=total_labor_minutes,
+                payment_status=(
+                    event.payment_status or "Pending"
+                ),
+                payment_method=event.payment_method,
+                payment_received_date=(
+                    event.payment_received_date
+                ),
+                notes=event.notes,
+            )
+        )
+
+    return schemas.ServiceHistoryResponse(
+        summary=schemas.ServiceHistorySummary(
+            services=int(summary_row.services or 0),
+            total_amount=_money(
+                Decimal(str(summary_row.total_amount or 0))
+            ),
+            collected_amount=_money(
+                Decimal(str(summary_row.collected_amount or 0))
+            ),
+            pending_amount=_money(
+                Decimal(str(summary_row.pending_amount or 0))
+            ),
+        ),
+        items=items,
+    )
