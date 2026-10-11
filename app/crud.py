@@ -1,3 +1,4 @@
+from __future__ import annotations
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import select, extract, func, or_, case
 from datetime import date, time
