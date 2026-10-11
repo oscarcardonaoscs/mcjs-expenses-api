@@ -2748,8 +2748,7 @@ def update_helper_work_event(
     requested_helper_ids = None
 
     if "helpers" in fields_set:
-        if not requested_helpers:
-            raise ValueError("At least one helper is required")
+        requested_helpers = requested_helpers or []
 
         requested_helper_ids = {
             helper_item.helper_id

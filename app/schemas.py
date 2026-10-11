@@ -852,7 +852,7 @@ class HelperWorkEventCreate(BaseModel):
 
     notes: Optional[str] = None
 
-    helpers: List[HelperWorkEventHelperCreate] = Field(min_length=1)
+    helpers: List[HelperWorkEventHelperCreate] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_work_event(self):
