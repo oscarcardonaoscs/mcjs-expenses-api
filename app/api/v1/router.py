@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter
 
 from .expenses import router as expenses_router
@@ -14,6 +15,9 @@ from .helper_payroll_periods import router as helper_payroll_periods_router
 
 from .clients import router as clients_router
 from .history import router as history_router
+
+# Financial Dashboard
+from .financial_dashboard import router as financial_dashboard_router
 
 
 api = APIRouter()
@@ -33,3 +37,6 @@ api.include_router(helper_payroll_periods_router)
 
 api.include_router(clients_router)
 api.include_router(history_router)
+
+# Financial Dashboard
+api.include_router(financial_dashboard_router)
