@@ -2,7 +2,7 @@
 from datetime import date
 import calendar
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Tuple, List
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -25,7 +25,7 @@ class FinancialSummaryResponse(BaseModel):
     expense_ratio: Optional[Decimal]
 
 
-def month_bounds(year: int, month: int) -> tuple[date, date]:
+def month_bounds(year: int, month: int) -> Tuple[date, date]:
     start = date(year, month, 1)
     if month == 12:
         end = date(year + 1, 1, 1)
@@ -94,7 +94,7 @@ class MonthlyIncomeExpenses(BaseModel):
 
 class IncomeExpensesAnnualResponse(BaseModel):
     year: int
-    items: list[MonthlyIncomeExpenses]
+    items: List[MonthlyIncomeExpenses]
 
 
 @router.get("/income-expenses", response_model=IncomeExpensesAnnualResponse)
@@ -164,7 +164,7 @@ class IncomeByServiceTypeResponse(BaseModel):
     year: int
     month: int
     total_income: Decimal
-    items: list[IncomeByServiceTypeItem]
+    items: List[IncomeByServiceTypeItem]
 
 
 @router.get("/income-by-service-type", response_model=IncomeByServiceTypeResponse)
