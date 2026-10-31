@@ -2,6 +2,7 @@
 from datetime import date
 import calendar
 from decimal import Decimal
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -21,7 +22,7 @@ class FinancialSummaryResponse(BaseModel):
     expenses: Decimal
     net_balance: Decimal
     services_completed: int
-    expense_ratio: Decimal | None
+    expense_ratio: Optional[Decimal]
 
 
 def month_bounds(year: int, month: int) -> tuple[date, date]:
