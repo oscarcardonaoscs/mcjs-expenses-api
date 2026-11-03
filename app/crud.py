@@ -805,12 +805,31 @@ def list_expenses(
     category_id: Optional[int] = None,
     month: Optional[int] = None,
     year: Optional[int] = None,
+    vendor: Optional[str] = None,
+    payment: Optional[str] = None,
+    type_filter: Optional[str] = None,
+    search_item: Optional[str] = None,
 ):
+    """
+    List expenses using database-level filters.
+
+    Supports legacy expenses and expenses with multiple items.
+
+    Search by Item uses expense_concepts.name.
+
+    Returns complete expense records with all their items.
+    """
+
     E = models.Expense
+    I = models.ExpenseItem
     C = models.Category
     EC = models.ExpenseConcept
     V = models.Vendor
     PA = models.PaymentAccount
+
+    # ==========================================
+    # BASE QUERY
+    # ==========================================
 
     stmt = (
         select(
@@ -850,43 +869,233 @@ def list_expenses(
         .outerjoin(PA, E.payment_account_id == PA.id)
     )
 
+    # ==========================================
+    # YEAR
+    # ==========================================
+
+    if year is not None:
+        stmt = stmt.where(
+            extract("year", E.date) == year
+        )
+
+    # ==========================================
+    # MONTH
+    # ==========================================
+
+    # If month is None, include all months
+    # of the selected year.
+
+    if month is not None:
+        stmt = stmt.where(
+            extract("month", E.date) == month
+        )
+
+    # ==========================================
+    # CATEGORY
+    # ==========================================
+
     if category_id is not None:
         stmt = stmt.where(
             or_(
                 E.category_id == category_id,
-                E.items.any(models.ExpenseItem.category_id == category_id),
+                E.items.any(
+                    I.category_id == category_id
+                ),
             )
         )
 
-    if month is not None:
-        stmt = stmt.where(extract("month", E.date) == month)
+    # ==========================================
+    # VENDOR
+    # ==========================================
 
-    if year is not None:
-        stmt = stmt.where(extract("year", E.date) == year)
+    vendor = (vendor or "").strip()
 
-    stmt = stmt.order_by(E.date.desc(), E.id.desc())
+    if vendor:
+        stmt = stmt.where(
+            V.name == vendor
+        )
 
-    rows = [dict(row) for row in db.execute(stmt).mappings().all()]
-    expense_ids = [row["id"] for row in rows]
-    items_by_expense_id = {expense_id: [] for expense_id in expense_ids}
+    # ==========================================
+    # PAYMENT
+    # ==========================================
+
+    # Compatible with frontend values:
+    # CASH
+    # CARD **1001
+    # CHECK
+    # etc.
+
+    payment = (payment or "").strip()
+
+    if payment:
+        if " **" in payment:
+            payment_method, last4 = payment.rsplit(
+                " **", 1
+            )
+
+            stmt = stmt.where(
+                E.payment_method == payment_method,
+                PA.last4 == last4,
+            )
+        else:
+            stmt = stmt.where(
+                E.payment_method == payment,
+                or_(
+                    PA.last4.is_(None),
+                    PA.last4 == "",
+                ),
+            )
+
+    # ==========================================
+    # TYPE
+    # ==========================================
+
+    # ==========================================
+    # TYPE
+    # ==========================================
+
+    # Expense type:
+    # Fuel, Supplies, etc.
+    #
+    # Current records: expense_items.expense_type
+    # Legacy records: expenses.expense_type
+
+    type_filter = (type_filter or "").strip()
+
+    if type_filter:
+        stmt = stmt.where(
+            or_(
+                E.items.any(
+                    I.expense_type == type_filter
+                ),
+                E.expense_type == type_filter,
+            )
+        )
+
+    if type_filter:
+        stmt = stmt.where(
+            or_(
+                # Legacy expense type
+                E.expense_type == type_filter,
+
+                # Legacy expense concept
+                E.expense_concept.has(
+                    EC.name == type_filter
+                ),
+
+                # Item expense type
+                E.items.any(
+                    I.expense_type == type_filter
+                ),
+
+                # Item expense concept
+                E.items.any(
+                    I.expense_concept.has(
+                        EC.name == type_filter
+                    )
+                ),
+            )
+        )
+
+    # ==========================================
+    # SEARCH BY ITEM
+    # ==========================================
+
+    # Search only in expense_concepts.name.
+    # Does not search item descriptions.
+
+    search_item = (search_item or "").strip()
+
+    if search_item:
+        concept_match = func.lower(
+            EC.name
+        ).contains(
+            search_item.lower(),
+            autoescape=True,
+        )
+
+        stmt = stmt.where(
+            or_(
+                # Legacy expenses
+                E.expense_concept.has(
+                    concept_match
+                ),
+
+                # Expenses with items
+                E.items.any(
+                    I.expense_concept.has(
+                        concept_match
+                    )
+                ),
+            )
+        )
+
+    # ==========================================
+    # ORDER
+    # ==========================================
+
+    stmt = stmt.order_by(
+        E.date.desc(),
+        E.id.desc(),
+    )
+
+    # ==========================================
+    # EXECUTE QUERY
+    # ==========================================
+
+    rows = [
+        dict(row)
+        for row in db.execute(stmt).mappings().all()
+    ]
+
+    expense_ids = [
+        row["id"]
+        for row in rows
+    ]
+
+    items_by_expense_id = {
+        expense_id: []
+        for expense_id in expense_ids
+    }
+
+    # ==========================================
+    # LOAD EXPENSE ITEMS
+    # ==========================================
 
     if expense_ids:
         item_stmt = (
-            select(models.ExpenseItem)
+            select(I)
             .options(
-                joinedload(models.ExpenseItem.category),
-                joinedload(models.ExpenseItem.expense_concept),
+                joinedload(I.category),
+                joinedload(I.expense_concept),
             )
-            .where(models.ExpenseItem.expense_id.in_(expense_ids))
-            .order_by(models.ExpenseItem.expense_id, models.ExpenseItem.id)
+            .where(
+                I.expense_id.in_(expense_ids)
+            )
+            .order_by(
+                I.expense_id,
+                I.id,
+            )
         )
+
         for item in db.scalars(item_stmt).all():
-            items_by_expense_id[item.expense_id].append(item)
+            items_by_expense_id[
+                item.expense_id
+            ].append(item)
+
+    # ==========================================
+    # BUILD RESPONSE
+    # ==========================================
 
     for row in rows:
-        row["items"] = items_by_expense_id[row["id"]]
+        row["items"] = items_by_expense_id[
+            row["id"]
+        ]
 
-    return [schemas.ExpenseOut(**row) for row in rows]
+    return [
+        schemas.ExpenseOut(**row)
+        for row in rows
+    ]
 
 
 def get_expense(db: Session, expense_id: int):
