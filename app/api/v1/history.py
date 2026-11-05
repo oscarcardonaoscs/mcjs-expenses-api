@@ -1,4 +1,6 @@
+
 from datetime import date
+from enum import Enum
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,6 +14,13 @@ router = APIRouter(
     prefix="/history",
     tags=["History"],
 )
+
+
+def enum_value(value):
+    """Return the Enum value, or the original value if already a string."""
+    if isinstance(value, Enum):
+        return value.value
+    return value
 
 
 @router.get(
@@ -48,21 +57,9 @@ def get_service_history(
         date_from=date_from,
         date_to=date_to,
         client_id=client_id,
-        service_type=(
-            service_type.value
-            if service_type is not None
-            else None
-        ),
-        payment_status=(
-            payment_status.value
-            if payment_status is not None
-            else None
-        ),
-        payment_method=(
-            payment_method.value
-            if payment_method is not None
-            else None
-        ),
+        service_type=enum_value(service_type),
+        payment_status=enum_value(payment_status),
+        payment_method=enum_value(payment_method),
         skip=skip,
         limit=limit,
     )
